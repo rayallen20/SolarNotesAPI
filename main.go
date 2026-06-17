@@ -1,0 +1,33 @@
+package main
+
+import (
+	"SolarNotesAPI/controller/article"
+	"SolarNotesAPI/controller/v1/book"
+	"SolarNotesAPI/controller/v1/catalogue"
+	"SolarNotesAPI/controller/v1/planet"
+
+	"github.com/gin-gonic/gin"
+)
+
+func main() {
+	r := gin.Default()
+
+	// 路由分组
+	v1 := r.Group("/api/v1")
+
+	{
+		// 天体简介API
+		v1.GET("/planet/list", planet.List)
+
+		// 书籍列表API
+		v1.GET("/book/list", book.List)
+
+		// 获取目录API
+		v1.GET("/catalogue/show", catalogue.Show)
+
+		// 获取文章API
+		v1.GET("/article/show", article.Show)
+	}
+
+	r.Run("0.0.0.0:4061")
+}
