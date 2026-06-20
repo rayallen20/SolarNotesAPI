@@ -38,12 +38,6 @@ func List(c *gin.Context) {
 				"intro": "暂无",
 			},
 			{
-				"id":    4,
-				"name":  "Earth",
-				"title": "暂无",
-				"intro": "暂无",
-			},
-			{
 				"id":    5,
 				"name":  "Mars",
 				"title": "暂无",
