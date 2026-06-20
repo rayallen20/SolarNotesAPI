@@ -6,11 +6,30 @@ import (
 	"SolarNotesAPI/controller/v1/catalogue"
 	"SolarNotesAPI/controller/v1/planet"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
 	r := gin.Default()
+
+	// 使用跨域中间件
+	corsConfig := cors.Config{
+		AllowAllOrigins: true,
+		AllowMethods: []string{
+			"GET",
+			"POST",
+			"PUT",
+			"PATCH",
+			"DELETE",
+		},
+		AllowHeaders: []string{
+			"Origin",
+			"Content-Type",
+			"Authorization",
+		},
+	}
+	r.Use(cors.New(corsConfig))
 
 	// 路由分组
 	v1 := r.Group("/api/v1")
