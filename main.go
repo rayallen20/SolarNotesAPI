@@ -39,13 +39,13 @@ func main() {
 		v1.GET("/planet/list", planet.List)
 
 		// 书籍列表API
-		v1.GET("/book/list", book.List)
+		v1.POST("/book/list", book.List)
 
 		// 获取目录API
-		v1.GET("/catalogue/show", catalogue.Show)
+		v1.POST("/catalogue/show", catalogue.Show)
 
 		// 获取文章API
-		v1.GET("/article/show", article.Show)
+		v1.POST("/article/show", article.Show)
 	}
 
 	r.Run("0.0.0.0:4061")
