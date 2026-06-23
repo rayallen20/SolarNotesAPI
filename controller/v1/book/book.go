@@ -20,6 +20,16 @@ func List(c *gin.Context) {
 		return
 	}
 
+	planetId := req.Planet.Id
+	if *planetId == 2 {
+		data := map[string]interface{}{
+			"bookList": []map[string]interface{}{},
+		}
+		respBody.Success(data)
+		c.JSON(http.StatusOK, respBody)
+		return
+	}
+
 	data := map[string]interface{}{
 		"bookList": []map[string]interface{}{
 			{
