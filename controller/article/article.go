@@ -9,7 +9,7 @@ import (
 )
 
 // Show 获取文章API
-func Show(c *gin.Context)  {
+func Show(c *gin.Context) {
 	req := article.ShowReq{}
 	respBody := &resp_body.RespBody{}
 
@@ -158,9 +158,11 @@ func Show(c *gin.Context)  {
 		"```"
 
 	data := map[string]interface{}{
-		"id": 1,
-		"content": content,
-		"createdAt": "2026-01-05",
+		"article": map[string]interface{}{
+			"id":        1,
+			"content":   content,
+			"createdAt": "2026-01-05",
+		},
 	}
 
 	respBody.Success(data)
