@@ -1,7 +1,7 @@
 package main
 
 import (
-	"SolarNotesAPI/controller/article"
+	"SolarNotesAPI/controller/v1/article"
 	"SolarNotesAPI/controller/v1/book"
 	"SolarNotesAPI/controller/v1/catalogue"
 	"SolarNotesAPI/controller/v1/planet"

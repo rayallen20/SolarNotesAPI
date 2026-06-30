@@ -1,9 +1,9 @@
 package article
 
 type ShowReq struct {
-	Article *ShowArticle `json:"article" binding:"required"`
+	Catalogue *ShowCatalogue `json:"catalogue" binding:"required"`
 }
 
-type ShowArticle struct {
+type ShowCatalogue struct {
 	Id *int `json:"id" binding:"required,min=1"`
 }
