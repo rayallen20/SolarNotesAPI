@@ -5,5 +5,5 @@ type ShowReq struct {
 }
 
 type ShowCatalogue struct {
-	Id *int `json:"id" binding:"required,min=1"`
+	ID int64 `json:"id,string" binding:"gt=0"`
 }

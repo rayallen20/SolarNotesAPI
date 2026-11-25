@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>获取目录 API 实现方案 · SolarNotes API</title>
+  <style>
+    :root { color-scheme: light; font-family: "Source Sans 3", system-ui, sans-serif; line-height: 1.7; color: #202f39; background: #f2f5f4; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 55rem; margin: 2rem auto; padding: clamp(1.25rem, 5vw, 3.5rem); background: white; border-top: 5px solid #17685a; }
+    h1, h2, h3 { line-height: 1.35; color: #153e38; }
+    h1 { margin: 0 0 .7rem; font-size: clamp(1.8rem, 4vw, 2.5rem); }
+    h2 { margin: 2rem 0 .65rem; font-size: 1.35rem; }
+    h3 { margin: 1.25rem 0 .4rem; font-size: 1.04rem; }
+    p, ol { margin: .6rem 0; }
+    ol { padding-left: 1.4rem; }
+    li + li { margin-top: .35rem; }
+    a { color: #17685a; text-underline-offset: .15em; }
+    code { font: .92em/1.55 "IBM Plex Mono", ui-monospace, monospace; overflow-wrap: anywhere; }
+    pre { margin: .6rem 0 1rem; padding: .8rem 1rem; overflow-x: auto; border-left: 3px solid #508979; background: #f1f5f4; tab-size: 4; }
+    pre code { overflow-wrap: normal; }
+    table { width: 100%; border-collapse: collapse; }
+    td, th { padding: .55rem .65rem; text-align: left; vertical-align: top; border-bottom: 1px solid #d6e2df; }
+    th { background: #eaf3ef; }
+    .route, .refs { font-size: .93rem; }
+    .route { color: #17685a; }
+    .source { scroll-margin-top: 1rem; }
+    .source pre { border: 1px solid #d6e2df; background: #f8faf9; }
+    .hljs-keyword, .hljs-type { color: #67369b; }
+    .hljs-string, .hljs-literal { color: #126350; }
+    .hljs-title, .hljs-built_in { color: #205d88; }
+    .hljs-comment { color: #52665e; }
+    @media (max-width: 40rem) { main { margin: 0; } th, td { padding: .45rem .35rem; } }
+    @media print { main { max-width: none; margin: 0; } h2, h3 { break-after: avoid; } tr { break-inside: avoid; } }
+  
+    .jump { display: flex; flex-wrap: wrap; gap: .35rem 1.15rem; }
+    .rule { padding: .55rem 1rem; border-left: 3px solid #17685a; background: #f2f7f5; }
+    .source { margin: 1.4rem 0; }
+    .source h3 { font-size: 1rem; }
+    .source p { margin-top: .25rem; }
+    .table-wrap { overflow-x: auto; }
+    .hljs-addition { color: #0c553b; background: #dff4e8; }
+    .hljs-deletion { color: #913732; background: #fbe8e6; }
+    @media print { pre { white-space: pre-wrap; word-break: break-word; } }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <p class="route"><code>POST /api/v1/catalogue/show</code> · 评审稿</p>
+  <h1>获取目录 API 实现方案</h1>
+  <p>读者从书单打开一本书时，服务用书籍 ID 查询 <code>solar_notes</code>，返回一棵可阅读的目录树。当前控制器校验请求后返回固定目录。本次拟替换该 mock，并让真实目录节点 ID 能一直传到文章请求。</p>
+  <nav class="jump" aria-label="文档导航">
+    <a href="#contract">接口契约</a><a href="#tree">组树与排序</a><a href="#errors">空目录与错误</a><a href="#backend">后端候选代码</a><a href="#frontend">前端逐文件差异</a><a href="#verification">验证与联调</a>
+  </nav>
+</header>
+<section id="contract">
+  <h2>接口契约</h2>
+  <p>书单的 <code>data.bookList[].id</code> 原样传入 <code>book.id</code>。响应的 <code>data.catalogue</code> 是单一根对象。树上每个 <code>id</code> 均为对应目录行的主键，和书籍 ID 分属两张表。对外 ID 统一为正 <code>int64</code> 的十进制字符串，最大值为 <code>9223372036854775807</code>。</p>
+  <h3>目录请求</h3>
+  <p>浏览器发送 JSON，请求头使用 <code>Content-Type: application/json</code>。现有路由入口和目录请求结构可直接复用。</p>
+  <pre><code class="language-json"><span class="hljs-punctuation">{</span><span class="hljs-attr">&quot;book&quot;</span><span class="hljs-punctuation">:</span><span class="hljs-punctuation">{</span><span class="hljs-attr">&quot;id&quot;</span><span class="hljs-punctuation">:</span><span class="hljs-string">&quot;9007199254740995&quot;</span><span class="hljs-punctuation">}</span><span class="hljs-punctuation">}</span></code></pre>
+  <h3>成功响应示例</h3>
+  <p>读者展开“轨道”后可以选择两篇文章。“观测附录”是已公开的空文件夹，也会出现在树中。以下数据用于说明契约。</p>
+  <pre><code class="language-json"><span class="hljs-punctuation">{</span>
+  <span class="hljs-attr">&quot;code&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-number">200</span><span class="hljs-punctuation">,</span>
+  <span class="hljs-attr">&quot;message&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;success&quot;</span><span class="hljs-punctuation">,</span>
+  <span class="hljs-attr">&quot;data&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-punctuation">{</span>
+    <span class="hljs-attr">&quot;catalogue&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-punctuation">{</span>
+      <span class="hljs-attr">&quot;id&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;9007199254740997&quot;</span><span class="hljs-punctuation">,</span>
+      <span class="hljs-attr">&quot;type&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;folder&quot;</span><span class="hljs-punctuation">,</span>
+      <span class="hljs-attr">&quot;name&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;太阳系观测笔记&quot;</span><span class="hljs-punctuation">,</span>
+      <span class="hljs-attr">&quot;intro&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;从地球出发认识太阳系&quot;</span><span class="hljs-punctuation">,</span>
+      <span class="hljs-attr">&quot;createdAt&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;2026-05-10&quot;</span><span class="hljs-punctuation">,</span>
+      <span class="hljs-attr">&quot;children&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-punctuation">[</span>
+        <span class="hljs-punctuation">{</span>
+          <span class="hljs-attr">&quot;id&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;9007199254740998&quot;</span><span class="hljs-punctuation">,</span>
+          <span class="hljs-attr">&quot;type&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;folder&quot;</span><span class="hljs-punctuation">,</span>
+          <span class="hljs-attr">&quot;name&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;轨道&quot;</span><span class="hljs-punctuation">,</span>
+          <span class="hljs-attr">&quot;intro&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;认识轨道的形状&quot;</span><span class="hljs-punctuation">,</span>
+          <span class="hljs-attr">&quot;createdAt&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;2026-05-11&quot;</span><span class="hljs-punctuation">,</span>
+          <span class="hljs-attr">&quot;children&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-punctuation">[</span>
+            <span class="hljs-punctuation">{</span>
+              <span class="hljs-attr">&quot;id&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;9017199254740996&quot;</span><span class="hljs-punctuation">,</span>
+              <span class="hljs-attr">&quot;type&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;file&quot;</span><span class="hljs-punctuation">,</span>
+              <span class="hljs-attr">&quot;name&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;椭圆轨道&quot;</span>
+            <span class="hljs-punctuation">}</span><span class="hljs-punctuation">,</span>
+            <span class="hljs-punctuation">{</span>
+              <span class="hljs-attr">&quot;id&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;9017199254740997&quot;</span><span class="hljs-punctuation">,</span>
+              <span class="hljs-attr">&quot;type&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;file&quot;</span><span class="hljs-punctuation">,</span>
+              <span class="hljs-attr">&quot;name&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;轨道周期&quot;</span>
+            <span class="hljs-punctuation">}</span>
+          <span class="hljs-punctuation">]</span>
+        <span class="hljs-punctuation">}</span><span class="hljs-punctuation">,</span>
+        <span class="hljs-punctuation">{</span>
+          <span class="hljs-attr">&quot;id&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;9007199254740999&quot;</span><span class="hljs-punctuation">,</span>
+          <span class="hljs-attr">&quot;type&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;folder&quot;</span><span class="hljs-punctuation">,</span>
+          <span class="hljs-attr">&quot;name&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;观测附录&quot;</span><span class="hljs-punctuation">,</span>
+          <span class="hljs-attr">&quot;intro&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;&quot;</span><span class="hljs-punctuation">,</span>
+          <span class="hljs-attr">&quot;createdAt&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;2026-05-12&quot;</span><span class="hljs-punctuation">,</span>
+          <span class="hljs-attr">&quot;children&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-punctuation">[</span><span class="hljs-punctuation">]</span>
+        <span class="hljs-punctuation">}</span>
+      <span class="hljs-punctuation">]</span>
+    <span class="hljs-punctuation">}</span>
+  <span class="hljs-punctuation">}</span>
+<span class="hljs-punctuation">}</span></code></pre>
+  <p>文件夹固定包含 <code>intro</code>、<code>createdAt</code> 和 <code>children</code>。即使简介为空，也输出空字符串。文件只返回 <code>id</code>、<code>type</code>、<code>name</code>。</p>
+  <h3>点选叶节点后的文章请求</h3>
+  <p>选择“椭圆轨道”时，将该叶的 <code>id</code> 原样提交给 <code>POST /api/v1/article/show</code>。文章响应自己的 <code>data.article.id</code> 也用字符串表示。文章 mock 的固定主键拟输出为 <code>"1"</code>。正文查询留待文章接口开发。</p>
+  <pre><code class="language-json"><span class="hljs-punctuation">{</span><span class="hljs-attr">&quot;catalogue&quot;</span><span class="hljs-punctuation">:</span><span class="hljs-punctuation">{</span><span class="hljs-attr">&quot;id&quot;</span><span class="hljs-punctuation">:</span><span class="hljs-string">&quot;9017199254740996&quot;</span><span class="hljs-punctuation">}</span><span class="hljs-punctuation">}</span></code></pre>
+  <p class="refs">接口依据 · <a href="../api/获取目录API.md">目录接口</a> · <a href="../api/获取文章API.md">文章接口</a> · <a href="../api/README.md">大整数传输约定</a></p>
+</section>
+<section id="tree">
+  <h2>数据库读取、组树与排序</h2>
+  <ol>
+    <li>在同一个只读 <code>REPEATABLE READ</code> 事务中确认 <code>book.id</code> 存在且 <code>book.display_status = 'visible'</code>，再按 <code>catalogue.book_id</code> 读取该书的全部目录行。请求上下文贯穿两次查询。整树取完即可结束事务，随后在内存中组树。</li>
+    <li>目录行按 <code>sort ASC</code> 查询。按父 ID 将行依次追加到各自的子项列表，每个列表自然按数值升序。不同父项允许使用相同序号。同父项已分配的序号唯一，隐藏项占位造成的跳号保留。文件和文件夹参与同一次排序。</li>
+    <li>校验所有行。非空目录必须有唯一的 <code>parent_id = 0</code> 根，类型为 <code>folder</code>，且 <code>sort = 0</code>。非根必须挂在同书的文件夹下，序号为正数，或处于 <code>sort IS NULL</code> 且隐藏的待排状态。非法类型、状态、重复 ID、重复序号、孤儿和无法从根访问的环均属于数据错误。</li>
+    <li>从根向下遍历。节点及其所有祖先均为 <code>visible</code> 才可公开。名称严格等于小写 <code>img</code> 的文件夹会连同整支子树排除。名为 <code>img</code> 的文件和名为 <code>IMG</code> 的普通文件夹遵循正常显隐规则。隐藏父项下即便有可见子项，也不会将子项提到上一层。</li>
+  </ol>
+  <div class="table-wrap"><table><thead><tr><th>响应字段</th><th>取值与依据</th></tr></thead><tbody>
+    <tr><td><code>id / type / name</code></td><td>分别取目录行的 <code>id / type / name</code>。本稿按“节点名称”的契约取根行的 <code>catalogue.name</code>。表注释约定它与书名相同，但后台改书名只更新 <code>book.title</code>，因此改名后，读者可能看到书单标题与目录根名称不同。这是需要确认的展示口径。</td></tr>
+    <tr><td><code>intro</code></td><td>取文件夹的 <code>catalogue.intro</code>。根行存书籍简介，子文件夹行存该章节简介。</td></tr>
+    <tr><td><code>createdAt</code></td><td>取该文件夹行的 <code>catalogue.created_at</code>。本地结构快照定义为 <code>DATETIME NOT NULL</code>。现有 MySQL 连接已启用 <code>ParseTime</code>，直接按原日历日期输出 <code>YYYY-MM-DD</code>。</td></tr>
+    <tr><td><code>children</code></td><td>仅文件夹携带，元素为直接公开子项。父 ID、显隐状态和序号仅用于查询和组树。</td></tr>
+  </tbody></table></div>
+  <p>结构依据为本地 <code>solar_notes_2026-11-19.sql</code> 的 <code>catalogue</code> 建表定义，其中 <code>uk_book_parent_sort</code> 约束同书同父已分配序号的唯一性。后台实现可参见 <a href="../../../SolarNotesAdminAPI/model/catalogue.go">目录快照读取</a>、<a href="../../../SolarNotesAdminAPI/biz/catalogue_node.go">树校验及 img 规则</a>、<a href="../../../SolarNotesAdminAPI/biz/catalogue_order.go">同级序号</a>和<a href="../../../SolarNotesAdminAPI/model/book.go">书籍重命名</a>。</p>
+</section>
+<section id="errors">
+  <h2>空目录与错误响应</h2>
+  <p class="rule"><strong>建议采用以下约定。</strong>可见根即使没有公开子项，读者仍能看到它的名称和简介。可见书籍没有公开根时，返回业务码 <code>20301</code>，现有阅读页进入“加载失败”，可点击“重试”。这项约定保留成功响应的单根结构，也使前端能够区分“空文件夹”和“没有可读目录”。</p>
+  <div class="table-wrap"><table><thead><tr><th>场景</th><th>业务码</th><th>返回内容</th></tr></thead><tbody>
+    <tr><td>合法可见根，含零个或多个公开子项</td><td>200</td><td><code>data.catalogue</code> 为根对象，空子项为 <code>[]</code>。</td></tr>
+    <tr><td>缺少请求对象或 ID，或 ID 为裸数字、零、负数、小数、溢出值</td><td>10101</td><td>沿用参数校验消息。</td></tr>
+    <tr><td>书籍缺失或已隐藏</td><td>20202</td><td>书籍不存在或未公开。</td></tr>
+    <tr><td>可见书尚无目录行，或合法根被隐藏、属于 img 资源目录</td><td>20301</td><td>这本书暂无公开目录。</td></tr>
+    <tr><td>非空目录结构损坏，包括隐藏分支内的结构错误</td><td>500</td><td>服务暂时不可用，仅返回公开消息。</td></tr>
+    <tr><td>数据库连接、查询或事务失败</td><td>10201</td><td>数据库操作失败，仅返回公开消息。</td></tr>
+  </tbody></table></div>
+  <p>上述结果的 HTTP 状态均为 200，由响应体 <code>code</code> 表示业务结果。失败统一返回 <code>data: {}</code>。前台拟沿用后台书籍缺失和目录缺失的码值，公开语义如表所示。<a href="../../../SolarNotesAdminAPI/resp_body/resp_body.go">后台响应码定义</a></p>
+  <pre><code class="language-json"><span class="hljs-punctuation">{</span><span class="hljs-attr">&quot;code&quot;</span><span class="hljs-punctuation">:</span><span class="hljs-number">20301</span><span class="hljs-punctuation">,</span><span class="hljs-attr">&quot;message&quot;</span><span class="hljs-punctuation">:</span><span class="hljs-string">&quot;这本书暂无公开目录&quot;</span><span class="hljs-punctuation">,</span><span class="hljs-attr">&quot;data&quot;</span><span class="hljs-punctuation">:</span><span class="hljs-punctuation">{</span><span class="hljs-punctuation">}</span><span class="hljs-punctuation">}</span></code></pre>
+</section>
+<section id="backend"><h2>后端候选代码</h2><p>以下按文件给出可编译的候选实现。目录接口沿用已注册的 Gin 路由及现有配置、连接池和通用响应体。接口按书返回完整树，前端用它建立全树索引和定位首篇文章。</p><nav class="jump" aria-label="后端文件导航"><a href="#handler">控制器</a> <a href="#dao">DAO</a> <a href="#business">组树</a> <a href="#response">响应结构</a> <a href="#domain-error">业务错误</a> <a href="#envelope">响应码</a> <a href="#article-req">文章入参</a> <a href="#article-id">文章 mock</a></nav>
+<article class="source" id="handler"><h3><code>controller/v1/catalogue/catalogue.go</code></h3><p>替换目录 mock。控制器处理绑定、错误映射及序列化。所有层级的 ID 都在这一边界转成十进制字符串。</p><pre><code class="language-go" data-path="controller/v1/catalogue/catalogue.go"><span class="hljs-keyword">package</span> catalogue
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;errors&quot;</span>
+	<span class="hljs-string">&quot;net/http&quot;</span>
+	<span class="hljs-string">&quot;strconv&quot;</span>
+	<span class="hljs-string">&quot;time&quot;</span>
+
+	<span class="hljs-string">&quot;SolarNotesAPI/biz&quot;</span>
+	reqCatalogue <span class="hljs-string">&quot;SolarNotesAPI/param/req/v1/catalogue&quot;</span>
+	respCatalogue <span class="hljs-string">&quot;SolarNotesAPI/param/resp/v1/catalogue&quot;</span>
+	<span class="hljs-string">&quot;SolarNotesAPI/resp_body&quot;</span>
+	<span class="hljs-string">&quot;SolarNotesAPI/sys_error&quot;</span>
+
+	<span class="hljs-string">&quot;github.com/gin-gonic/gin&quot;</span>
+)
+
+<span class="hljs-comment">// Show 返回可见书籍的公开目录树.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">Show</span><span class="hljs-params">(c *gin.Context)</span></span> {
+	<span class="hljs-keyword">var</span> req reqCatalogue.ShowReq
+	<span class="hljs-keyword">var</span> body resp_body.RespBody
+	<span class="hljs-keyword">if</span> err := c.ShouldBindJSON(&amp;req); err != <span class="hljs-literal">nil</span> {
+		body.ValidateFailed(err)
+		c.JSON(http.StatusOK, body)
+		<span class="hljs-keyword">return</span>
+	}
+
+	root, err := biz.ReadCatalogue(c.Request.Context(), req.Book.ID)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">var</span> dbErr *sys_error.DatabaseError
+		<span class="hljs-keyword">switch</span> {
+		<span class="hljs-keyword">case</span> errors.Is(err, sys_error.BookNotFoundErr):
+			body.BookNotFoundError()
+		<span class="hljs-keyword">case</span> errors.Is(err, sys_error.CatalogueNotFoundErr):
+			body.CatalogueNotFoundError()
+		<span class="hljs-keyword">case</span> errors.As(err, &amp;dbErr):
+			body.DBError()
+		<span class="hljs-keyword">default</span>:
+			body.InternalError()
+		}
+		c.JSON(http.StatusOK, body)
+		<span class="hljs-keyword">return</span>
+	}
+
+	body.Success(<span class="hljs-keyword">map</span>[<span class="hljs-type">string</span>]any{<span class="hljs-string">&quot;catalogue&quot;</span>: toResponse(root)})
+	c.JSON(http.StatusOK, body)
+}
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">toResponse</span><span class="hljs-params">(node *biz.CatalogueNode)</span></span> respCatalogue.Node {
+	item := respCatalogue.Node{
+		ID:   strconv.FormatInt(node.ID, <span class="hljs-number">10</span>),
+		Type: node.Type,
+		Name: node.Name,
+	}
+	<span class="hljs-keyword">if</span> node.Type == <span class="hljs-string">&quot;folder&quot;</span> {
+		children := <span class="hljs-built_in">make</span>([]respCatalogue.Node, <span class="hljs-number">0</span>, <span class="hljs-built_in">len</span>(node.Children))
+		<span class="hljs-keyword">for</span> _, child := <span class="hljs-keyword">range</span> node.Children {
+			children = <span class="hljs-built_in">append</span>(children, toResponse(child))
+		}
+		item.FolderFields = &amp;respCatalogue.FolderFields{
+			Intro:     node.Intro,
+			CreatedAt: node.CreatedAt.Format(time.DateOnly),
+			Children:  children,
+		}
+	}
+	<span class="hljs-keyword">return</span> item
+}
+</code></pre></article>
+<article class="source" id="dao"><h3><code>model/catalogue.go</code></h3><p>新增目录 DAO。直接复用 db.DB 的单数表名策略与现有 Book 模型，同一本书只需两次读取。SQL 排序由数据库完成。</p><pre><code class="language-go" data-path="model/catalogue.go"><span class="hljs-keyword">package</span> model
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;context&quot;</span>
+	<span class="hljs-string">&quot;database/sql&quot;</span>
+	<span class="hljs-string">&quot;errors&quot;</span>
+	<span class="hljs-string">&quot;time&quot;</span>
+
+	<span class="hljs-string">&quot;SolarNotesAPI/db&quot;</span>
+
+	<span class="hljs-string">&quot;gorm.io/gorm&quot;</span>
+)
+
+<span class="hljs-keyword">var</span> BookNotFoundErr = errors.New(<span class="hljs-string">&quot;visible book not found&quot;</span>)
+
+<span class="hljs-keyword">type</span> Catalogue <span class="hljs-keyword">struct</span> {
+	ID            <span class="hljs-type">int64</span>     <span class="hljs-string">`gorm:&quot;column:id;primaryKey;autoIncrement:false&quot;`</span>
+	BookID        <span class="hljs-type">int64</span>     <span class="hljs-string">`gorm:&quot;column:book_id&quot;`</span>
+	ParentID      <span class="hljs-type">int64</span>     <span class="hljs-string">`gorm:&quot;column:parent_id&quot;`</span>
+	Type          <span class="hljs-type">string</span>    <span class="hljs-string">`gorm:&quot;column:type&quot;`</span>
+	Name          <span class="hljs-type">string</span>    <span class="hljs-string">`gorm:&quot;column:name&quot;`</span>
+	Intro         <span class="hljs-type">string</span>    <span class="hljs-string">`gorm:&quot;column:intro&quot;`</span>
+	Sort          *<span class="hljs-type">int32</span>    <span class="hljs-string">`gorm:&quot;column:sort&quot;`</span>
+	DisplayStatus <span class="hljs-type">string</span>    <span class="hljs-string">`gorm:&quot;column:display_status&quot;`</span>
+	CreatedAt     time.Time <span class="hljs-string">`gorm:&quot;column:created_at&quot;`</span>
+}
+
+<span class="hljs-comment">// ReadBookTree reads the visible book and all its nodes from one snapshot.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(Catalogue)</span></span> ReadBookTree(ctx context.Context, bookID <span class="hljs-type">int64</span>) ([]Catalogue, <span class="hljs-type">error</span>) {
+	<span class="hljs-keyword">if</span> db.DB == <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, errors.New(<span class="hljs-string">&quot;database connection is not initialized&quot;</span>)
+	}
+
+	<span class="hljs-keyword">var</span> rows []Catalogue
+	opts := &amp;sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: <span class="hljs-literal">true</span>}
+	err := db.DB.WithContext(ctx).Transaction(<span class="hljs-function"><span class="hljs-keyword">func</span><span class="hljs-params">(tx *gorm.DB)</span></span> <span class="hljs-type">error</span> {
+		<span class="hljs-keyword">var</span> book Book
+		err := tx.Select(<span class="hljs-string">&quot;id&quot;</span>).Where(<span class="hljs-string">&quot;id = ? AND display_status = ?&quot;</span>, bookID, <span class="hljs-string">&quot;visible&quot;</span>).Take(&amp;book).Error
+		<span class="hljs-keyword">if</span> errors.Is(err, gorm.ErrRecordNotFound) {
+			<span class="hljs-keyword">return</span> BookNotFoundErr
+		}
+		<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+			<span class="hljs-keyword">return</span> err
+		}
+
+		<span class="hljs-keyword">return</span> tx.Select(<span class="hljs-string">&quot;id&quot;</span>, <span class="hljs-string">&quot;book_id&quot;</span>, <span class="hljs-string">&quot;parent_id&quot;</span>, <span class="hljs-string">&quot;type&quot;</span>, <span class="hljs-string">&quot;name&quot;</span>, <span class="hljs-string">&quot;intro&quot;</span>, <span class="hljs-string">&quot;sort&quot;</span>, <span class="hljs-string">&quot;display_status&quot;</span>, <span class="hljs-string">&quot;created_at&quot;</span>).
+			Where(<span class="hljs-string">&quot;book_id = ?&quot;</span>, bookID).
+			Order(<span class="hljs-string">&quot;sort ASC&quot;</span>).
+			Find(&amp;rows).Error
+	}, opts)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, err
+	}
+	<span class="hljs-keyword">return</span> rows, <span class="hljs-literal">nil</span>
+}
+</code></pre></article>
+<article class="source" id="business"><h3><code>biz/catalogue.go</code></h3><p>新增目录业务实体和组树逻辑。按父 ID 建索引后遍历一次，在隐藏分支内继续计数以校验可达性，仅将公开子项挂到返回树。建索引及遍历的时间、空间均为 O(n)。</p><pre><code class="language-go" data-path="biz/catalogue.go"><span class="hljs-keyword">package</span> biz
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;context&quot;</span>
+	<span class="hljs-string">&quot;errors&quot;</span>
+	<span class="hljs-string">&quot;fmt&quot;</span>
+	<span class="hljs-string">&quot;time&quot;</span>
+
+	<span class="hljs-string">&quot;SolarNotesAPI/model&quot;</span>
+	<span class="hljs-string">&quot;SolarNotesAPI/sys_error&quot;</span>
+)
+
+<span class="hljs-keyword">type</span> CatalogueNode <span class="hljs-keyword">struct</span> {
+	ID        <span class="hljs-type">int64</span>
+	Type      <span class="hljs-type">string</span>
+	Name      <span class="hljs-type">string</span>
+	Intro     <span class="hljs-type">string</span>
+	CreatedAt time.Time
+	Children  []*CatalogueNode
+}
+
+<span class="hljs-comment">// ReadCatalogue reads the public catalogue rooted at the given book.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">ReadCatalogue</span><span class="hljs-params">(ctx context.Context, bookID <span class="hljs-type">int64</span>)</span></span> (*CatalogueNode, <span class="hljs-type">error</span>) {
+	<span class="hljs-keyword">if</span> ctx == <span class="hljs-literal">nil</span> || bookID &lt;= <span class="hljs-number">0</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, errors.New(<span class="hljs-string">&quot;biz.ReadCatalogue: invalid context or book ID&quot;</span>)
+	}
+	<span class="hljs-keyword">var</span> dao model.Catalogue
+	rows, err := dao.ReadBookTree(ctx, bookID)
+	<span class="hljs-keyword">if</span> errors.Is(err, model.BookNotFoundErr) {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, sys_error.BookNotFoundErr
+	}
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, &amp;sys_error.DatabaseError{Cause: err}
+	}
+	<span class="hljs-keyword">return</span> buildCatalogueTree(bookID, rows)
+}
+
+<span class="hljs-comment">// buildCatalogueTree expects the DAO&#x27;s ascending sort order. Filtering by</span>
+<span class="hljs-comment">// parent preserves that order within each set of siblings.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">buildCatalogueTree</span><span class="hljs-params">(bookID <span class="hljs-type">int64</span>, rows []model.Catalogue)</span></span> (*CatalogueNode, <span class="hljs-type">error</span>) {
+	<span class="hljs-keyword">if</span> <span class="hljs-built_in">len</span>(rows) == <span class="hljs-number">0</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, sys_error.CatalogueNotFoundErr
+	}
+
+	byID := <span class="hljs-built_in">make</span>(<span class="hljs-keyword">map</span>[<span class="hljs-type">int64</span>]*model.Catalogue, <span class="hljs-built_in">len</span>(rows))
+	children := <span class="hljs-built_in">make</span>(<span class="hljs-keyword">map</span>[<span class="hljs-type">int64</span>][]*model.Catalogue)
+	<span class="hljs-keyword">var</span> root *model.Catalogue
+	<span class="hljs-keyword">for</span> i := <span class="hljs-keyword">range</span> rows {
+		row := &amp;rows[i]
+		<span class="hljs-keyword">if</span> row.ID &lt;= <span class="hljs-number">0</span> || row.BookID != bookID || row.ParentID &lt; <span class="hljs-number">0</span> {
+			<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, fmt.Errorf(<span class="hljs-string">&quot;book %d: invalid catalogue identity at node %d&quot;</span>, bookID, row.ID)
+		}
+		<span class="hljs-keyword">if</span> byID[row.ID] != <span class="hljs-literal">nil</span> {
+			<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, fmt.Errorf(<span class="hljs-string">&quot;book %d: duplicate node %d&quot;</span>, bookID, row.ID)
+		}
+		<span class="hljs-keyword">if</span> row.Type != <span class="hljs-string">&quot;folder&quot;</span> &amp;&amp; row.Type != <span class="hljs-string">&quot;file&quot;</span> {
+			<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, fmt.Errorf(<span class="hljs-string">&quot;node %d: unknown type %q&quot;</span>, row.ID, row.Type)
+		}
+		<span class="hljs-keyword">if</span> row.DisplayStatus != <span class="hljs-string">&quot;visible&quot;</span> &amp;&amp; row.DisplayStatus != <span class="hljs-string">&quot;hidden&quot;</span> {
+			<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, fmt.Errorf(<span class="hljs-string">&quot;node %d: unknown display status %q&quot;</span>, row.ID, row.DisplayStatus)
+		}
+		byID[row.ID] = row
+		<span class="hljs-keyword">if</span> row.ParentID == <span class="hljs-number">0</span> {
+			<span class="hljs-keyword">if</span> root != <span class="hljs-literal">nil</span> || row.Type != <span class="hljs-string">&quot;folder&quot;</span> || row.Sort == <span class="hljs-literal">nil</span> || *row.Sort != <span class="hljs-number">0</span> {
+				<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, fmt.Errorf(<span class="hljs-string">&quot;book %d: invalid or duplicate root %d&quot;</span>, bookID, row.ID)
+			}
+			root = row
+			<span class="hljs-keyword">continue</span>
+		}
+		<span class="hljs-keyword">if</span> (row.Sort == <span class="hljs-literal">nil</span> &amp;&amp; row.DisplayStatus != <span class="hljs-string">&quot;hidden&quot;</span>) || (row.Sort != <span class="hljs-literal">nil</span> &amp;&amp; *row.Sort &lt;= <span class="hljs-number">0</span>) {
+			<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, fmt.Errorf(<span class="hljs-string">&quot;node %d: invalid non-root sort&quot;</span>, row.ID)
+		}
+		siblings := children[row.ParentID]
+		<span class="hljs-keyword">if</span> row.Sort != <span class="hljs-literal">nil</span> &amp;&amp; <span class="hljs-built_in">len</span>(siblings) &gt; <span class="hljs-number">0</span> {
+			previous := siblings[<span class="hljs-built_in">len</span>(siblings)<span class="hljs-number">-1</span>].Sort
+			<span class="hljs-keyword">if</span> previous != <span class="hljs-literal">nil</span> &amp;&amp; *previous == *row.Sort {
+				<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, fmt.Errorf(<span class="hljs-string">&quot;parent %d: duplicate sort %d&quot;</span>, row.ParentID, *row.Sort)
+			}
+		}
+		children[row.ParentID] = <span class="hljs-built_in">append</span>(siblings, row)
+	}
+	<span class="hljs-keyword">if</span> root == <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, fmt.Errorf(<span class="hljs-string">&quot;book %d: catalogue root missing&quot;</span>, bookID)
+	}
+	<span class="hljs-keyword">for</span> parentID := <span class="hljs-keyword">range</span> children {
+		<span class="hljs-keyword">if</span> parent := byID[parentID]; parent == <span class="hljs-literal">nil</span> || parent.Type != <span class="hljs-string">&quot;folder&quot;</span> {
+			<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, fmt.Errorf(<span class="hljs-string">&quot;book %d: missing or non-folder parent %d&quot;</span>, bookID, parentID)
+		}
+	}
+
+	<span class="hljs-comment">// Visit even unpublished subtrees so that reachability covers every row.</span>
+	<span class="hljs-keyword">type</span> visit <span class="hljs-keyword">struct</span> {
+		row    *model.Catalogue
+		parent *CatalogueNode
+	}
+	queue := []visit{{row: root}}
+	<span class="hljs-keyword">var</span> result *CatalogueNode
+	<span class="hljs-keyword">for</span> i := <span class="hljs-number">0</span>; i &lt; <span class="hljs-built_in">len</span>(queue); i++ {
+		item := queue[i]
+		row := item.row
+		<span class="hljs-keyword">var</span> node *CatalogueNode
+		publish := row.DisplayStatus == <span class="hljs-string">&quot;visible&quot;</span> &amp;&amp; !(row.Type == <span class="hljs-string">&quot;folder&quot;</span> &amp;&amp; row.Name == <span class="hljs-string">&quot;img&quot;</span>)
+		<span class="hljs-keyword">if</span> publish &amp;&amp; (row == root || item.parent != <span class="hljs-literal">nil</span>) {
+			node = &amp;CatalogueNode{ID: row.ID, Type: row.Type, Name: row.Name}
+			<span class="hljs-keyword">if</span> row.Type == <span class="hljs-string">&quot;folder&quot;</span> {
+				node.Intro = row.Intro
+				node.CreatedAt = row.CreatedAt
+				node.Children = <span class="hljs-built_in">make</span>([]*CatalogueNode, <span class="hljs-number">0</span>)
+			}
+			<span class="hljs-keyword">if</span> row == root {
+				result = node
+			} <span class="hljs-keyword">else</span> {
+				item.parent.Children = <span class="hljs-built_in">append</span>(item.parent.Children, node)
+			}
+		}
+		<span class="hljs-keyword">for</span> _, child := <span class="hljs-keyword">range</span> children[row.ID] {
+			queue = <span class="hljs-built_in">append</span>(queue, visit{row: child, parent: node})
+		}
+	}
+	<span class="hljs-keyword">if</span> <span class="hljs-built_in">len</span>(queue) != <span class="hljs-built_in">len</span>(rows) {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, fmt.Errorf(<span class="hljs-string">&quot;book %d: unreachable catalogue cycle&quot;</span>, bookID)
+	}
+	<span class="hljs-keyword">if</span> result == <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, sys_error.CatalogueNotFoundErr
+	}
+	<span class="hljs-keyword">return</span> result, <span class="hljs-literal">nil</span>
+}
+</code></pre></article>
+<article class="source" id="response"><h3><code>param/resp/v1/catalogue/show.go</code></h3><p>新增响应结构。嵌入的 FolderFields 在文件上为空，JSON 编码器会一起省去三个文件夹专属字段。</p><pre><code class="language-go" data-path="param/resp/v1/catalogue/show.go"><span class="hljs-keyword">package</span> catalogue
+
+<span class="hljs-keyword">type</span> Node <span class="hljs-keyword">struct</span> {
+	ID   <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;id&quot;`</span>
+	Type <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;type&quot;`</span>
+	Name <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;name&quot;`</span>
+	*FolderFields
+}
+
+<span class="hljs-comment">// FolderFields 仅嵌入 folder 的响应, 保留空简介和空子数组.</span>
+<span class="hljs-keyword">type</span> FolderFields <span class="hljs-keyword">struct</span> {
+	Intro     <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;intro&quot;`</span>
+	CreatedAt <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;createdAt&quot;`</span>
+	Children  []Node <span class="hljs-string">`json:&quot;children&quot;`</span>
+}
+</code></pre></article>
+<article class="source" id="domain-error"><h3><code>sys_error/catalogue_error.go</code></h3><p>新增两项可公开的业务错误。</p><pre><code class="language-go" data-path="sys_error/catalogue_error.go"><span class="hljs-keyword">package</span> sys_error
+
+<span class="hljs-keyword">import</span> <span class="hljs-string">&quot;errors&quot;</span>
+
+<span class="hljs-keyword">var</span> (
+	BookNotFoundErr      = errors.New(<span class="hljs-string">&quot;书籍不存在或未公开&quot;</span>)
+	CatalogueNotFoundErr = errors.New(<span class="hljs-string">&quot;这本书暂无公开目录&quot;</span>)
+)
+</code></pre></article>
+<article class="source" id="envelope"><h3><code>resp_body/catalogue_error.go</code></h3><p>新增错误码和响应方法，复用现有 failure 构造统一包体。</p><pre><code class="language-go" data-path="resp_body/catalogue_error.go"><span class="hljs-keyword">package</span> resp_body
+
+<span class="hljs-keyword">import</span> <span class="hljs-string">&quot;SolarNotesAPI/sys_error&quot;</span>
+
+<span class="hljs-keyword">const</span> (
+	BookNotFoundCode      = <span class="hljs-number">20202</span>
+	CatalogueNotFoundCode = <span class="hljs-number">20301</span>
+)
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(r *RespBody)</span></span> BookNotFoundError() {
+	r.failure(BookNotFoundCode, sys_error.BookNotFoundErr.Error())
+}
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(r *RespBody)</span></span> CatalogueNotFoundError() {
+	r.failure(CatalogueNotFoundCode, sys_error.CatalogueNotFoundErr.Error())
+}
+</code></pre></article>
+<article class="source" id="article-req"><h3><code>param/req/v1/article/show.go</code></h3><p>同步修改文章请求绑定，接收目录叶节点的字符串 ID。目录自身的 book.id 已采用同一绑定规则。</p><pre><code class="language-go" data-path="param/req/v1/article/show.go"><span class="hljs-keyword">package</span> article
+
+<span class="hljs-keyword">type</span> ShowReq <span class="hljs-keyword">struct</span> {
+	Catalogue *ShowCatalogue <span class="hljs-string">`json:&quot;catalogue&quot; binding:&quot;required&quot;`</span>
+}
+
+<span class="hljs-keyword">type</span> ShowCatalogue <span class="hljs-keyword">struct</span> {
+	ID <span class="hljs-type">int64</span> <span class="hljs-string">`json:&quot;id,string&quot; binding:&quot;gt=0&quot;`</span>
+}
+</code></pre></article>
+<article class="source" id="article-id"><h3><code>controller/v1/article/article.go</code></h3><p>现有文章 mock 的绑定会自动使用新的请求结构。只需将响应中的文章主键改成字符串。将来接入文章表时，再按叶节点 ID 查正文并校验书籍与整条祖先链的公开状态。</p><pre><code class="language-diff" data-path="controller/v1/article/article.go"><span class="hljs-comment">--- a/controller/v1/article/article.go</span>
+<span class="hljs-comment">+++ b/controller/v1/article/article.go</span>
+@@ -162 +162 @@
+<span class="hljs-deletion">-			&quot;id&quot;:        1,</span>
+<span class="hljs-addition">+			&quot;id&quot;:        &quot;1&quot;,</span>
+</code></pre></article></section>
+<section id="frontend">
+  <h2>前端需要修改的代码</h2>
+  <p>前端工作树中的 <code>getCatalogue(bookId)</code> 和 <code>getArticle(leafId)</code> 均直接使用原值。实际改动集中在六个文件的类型注释，包括 API 类型、目录状态、索引、折叠和滚动定位。下面是逐文件完整变更，路径相对于 <code>SolarNotesFrontend</code>。</p>
+  <ol>
+    <li>书单链接将书籍 ID 带入 <code>/article/:id</code>。目录同步逻辑把路由参数交给 API，请求成功后将根交给 <code>setCatalogue(root)</code>。<a href="../../../SolarNotesFrontend/src/composables/useCatalogueSync.js">目录请求与重试</a></li>
+    <li>节点点击直接传递 <code>node.id</code>，选中状态用严格相等比较。索引与折叠集以字符串为键，“开启文章”按响应顺序深度优先找首个文件，并将该文件的父节点滚入视口。<code>TreeNode.depth</code> 和重试计数继续使用数值类型。<a href="../../../SolarNotesFrontend/src/components/article/TreeNode.vue">树节点组件</a> · <a href="../../../SolarNotesFrontend/src/components/article/CatalogueTree.vue">滚动定位</a></li>
+    <li>选中文件夹时展示目录行的简介和日期，只有选中文件才提交 <code>catalogue.id</code>。文章响应到达时，现有逻辑检查当前选中叶与请求时的 ID 一致，再写入正文。遇到 <code>20301</code>，Axios 拒绝该业务响应并进入阅读页的失败重试分支。<a href="../../../SolarNotesFrontend/src/composables/useArticleSync.js">文章同步</a> · <a href="../../../SolarNotesFrontend/src/lib/request.js">业务码处理</a> · <a href="../../../SolarNotesFrontend/src/pages/ArticleReader.vue">阅读页状态</a></li>
+  </ol>
+<article class="source"><h3><code>src/api/article.js</code></h3><pre><code class="language-diff" data-path="src/api/article.js"><span class="hljs-comment">diff --git a/src/api/article.js b/src/api/article.js</span>
+<span class="hljs-comment">--- a/src/api/article.js</span>
+<span class="hljs-comment">+++ b/src/api/article.js</span>
+@@ -5 +5 @@
+<span class="hljs-deletion">- * @property {Number} id 文章id</span>
+<span class="hljs-addition">+ * @property {String} id 文章id</span>
+@@ -12 +12 @@
+<span class="hljs-deletion">- * @param {Number} id 目录树中叶子节点id</span>
+<span class="hljs-addition">+ * @param {String} id 目录树中叶子节点id</span>
+</code></pre></article>
+<article class="source"><h3><code>src/api/catalogue.js</code></h3><pre><code class="language-diff" data-path="src/api/catalogue.js"><span class="hljs-comment">diff --git a/src/api/catalogue.js b/src/api/catalogue.js</span>
+<span class="hljs-comment">--- a/src/api/catalogue.js</span>
+<span class="hljs-comment">+++ b/src/api/catalogue.js</span>
+@@ -5 +5 @@
+<span class="hljs-deletion">- * @property {Number} id 节点唯一id</span>
+<span class="hljs-addition">+ * @property {String} id 节点唯一id</span>
+</code></pre></article>
+<article class="source"><h3><code>src/composables/useCollapseTransition.js</code></h3><pre><code class="language-diff" data-path="src/composables/useCollapseTransition.js"><span class="hljs-comment">diff --git a/src/composables/useCollapseTransition.js b/src/composables/useCollapseTransition.js</span>
+<span class="hljs-comment">--- a/src/composables/useCollapseTransition.js</span>
+<span class="hljs-comment">+++ b/src/composables/useCollapseTransition.js</span>
+@@ -13 +13 @@
+<span class="hljs-deletion">- * @param {Number} nodeId 要展开/折叠的节点id</span>
+<span class="hljs-addition">+ * @param {String} nodeId 要展开/折叠的节点id</span>
+</code></pre></article>
+<article class="source"><h3><code>src/lib/ensureNodeVisible.js</code></h3><pre><code class="language-diff" data-path="src/lib/ensureNodeVisible.js"><span class="hljs-comment">diff --git a/src/lib/ensureNodeVisible.js b/src/lib/ensureNodeVisible.js</span>
+<span class="hljs-comment">--- a/src/lib/ensureNodeVisible.js</span>
+<span class="hljs-comment">+++ b/src/lib/ensureNodeVisible.js</span>
+@@ -6 +6 @@
+<span class="hljs-deletion">- * @param {Number|null} targetNodeId 目标节点id</span>
+<span class="hljs-addition">+ * @param {String|null} targetNodeId 目标节点id</span>
+</code></pre></article>
+<article class="source"><h3><code>src/lib/treeQuery.js</code></h3><pre><code class="language-diff" data-path="src/lib/treeQuery.js"><span class="hljs-comment">diff --git a/src/lib/treeQuery.js b/src/lib/treeQuery.js</span>
+<span class="hljs-comment">--- a/src/lib/treeQuery.js</span>
+<span class="hljs-comment">+++ b/src/lib/treeQuery.js</span>
+@@ -16 +16 @@
+<span class="hljs-deletion">- * @param {Number} targetId 目标节点的id</span>
+<span class="hljs-addition">+ * @param {String} targetId 目标节点的id</span>
+@@ -53 +53 @@
+<span class="hljs-deletion">- * @param {Number} folderId 给定的非叶节点的节点id</span>
+<span class="hljs-addition">+ * @param {String} folderId 给定的非叶节点的节点id</span>
+@@ -99 +99 @@
+<span class="hljs-deletion">- * @return {Map&lt;Number, NodeIndexEntry&gt;} 节点映射,其中:</span>
+<span class="hljs-addition">+ * @return {Map&lt;String, NodeIndexEntry&gt;} 节点映射,其中:</span>
+@@ -130 +130 @@
+<span class="hljs-deletion">- * @return {Set&lt;Number&gt;} 初态应被折叠节点的id集合</span>
+<span class="hljs-addition">+ * @return {Set&lt;String&gt;} 初态应被折叠节点的id集合</span>
+</code></pre></article>
+<article class="source"><h3><code>src/stores/reader/catalogue.js</code></h3><pre><code class="language-diff" data-path="src/stores/reader/catalogue.js"><span class="hljs-comment">diff --git a/src/stores/reader/catalogue.js b/src/stores/reader/catalogue.js</span>
+<span class="hljs-comment">--- a/src/stores/reader/catalogue.js</span>
+<span class="hljs-comment">+++ b/src/stores/reader/catalogue.js</span>
+@@ -29 +29 @@
+<span class="hljs-deletion">-     * @type {import(&#x27;vue&#x27;).Ref&lt;Number|null&gt;} 当前选中节点的id</span>
+<span class="hljs-addition">+     * @type {import(&#x27;vue&#x27;).Ref&lt;String|null&gt;} 当前选中节点的id</span>
+@@ -36 +36 @@
+<span class="hljs-deletion">-     * @type {import(&#x27;vue&#x27;).Ref&lt;Set&lt;Number&gt;&gt;} 被折叠的非叶节点的id集合</span>
+<span class="hljs-addition">+     * @type {import(&#x27;vue&#x27;).Ref&lt;Set&lt;String&gt;&gt;} 被折叠的非叶节点的id集合</span>
+@@ -46 +46 @@
+<span class="hljs-deletion">-     * @type {import(&#x27;vue&#x27;).Ref&lt;Number|null&gt;} 待滚入目录面板视口的节点id</span>
+<span class="hljs-addition">+     * @type {import(&#x27;vue&#x27;).Ref&lt;String|null&gt;} 待滚入目录面板视口的节点id</span>
+@@ -52 +52 @@
+<span class="hljs-deletion">-     * @type {Set&lt;Number&gt;} 本集合用于存储强制展开(跳过动画)的节点id</span>
+<span class="hljs-addition">+     * @type {Set&lt;String&gt;} 本集合用于存储强制展开(跳过动画)的节点id</span>
+@@ -58 +58 @@
+<span class="hljs-deletion">-     * @type {import(&#x27;vue&#x27;).ComputedRef&lt;Map&lt;Number, import(&#x27;@/lib/treeQuery.js&#x27;).NodeIndexEntry&gt;&gt;} 树形结构中所有节点的id与节点及其路径的映射关系</span>
+<span class="hljs-addition">+     * @type {import(&#x27;vue&#x27;).ComputedRef&lt;Map&lt;String, import(&#x27;@/lib/treeQuery.js&#x27;).NodeIndexEntry&gt;&gt;} 树形结构中所有节点的id与节点及其路径的映射关系</span>
+@@ -97 +97 @@
+<span class="hljs-deletion">-     * @type {import(&#x27;vue&#x27;).ComputedRef&lt;Number|null&gt;} 当前选中的叶子节点的id(供ArticleStore使用)</span>
+<span class="hljs-addition">+     * @type {import(&#x27;vue&#x27;).ComputedRef&lt;String|null&gt;} 当前选中的叶子节点的id(供ArticleStore使用)</span>
+@@ -162 +162 @@
+<span class="hljs-deletion">-     * @param {Number} id 给定节点的id</span>
+<span class="hljs-addition">+     * @param {String} id 给定节点的id</span>
+@@ -213 +213 @@
+<span class="hljs-deletion">-     * @param {Number} id 被选中节点的id</span>
+<span class="hljs-addition">+     * @param {String} id 被选中节点的id</span>
+@@ -228 +228 @@
+<span class="hljs-deletion">-     * @param {Number} id 给定非叶节点的id</span>
+<span class="hljs-addition">+     * @param {String} id 给定非叶节点的id</span>
+@@ -241 +241 @@
+<span class="hljs-deletion">-     * @param {Array&lt;Number&gt;} ids 非叶节点id列表</span>
+<span class="hljs-addition">+     * @param {Array&lt;String&gt;} ids 非叶节点id列表</span>
+@@ -255 +255 @@
+<span class="hljs-deletion">-     * @param {Number} id 非叶节点id</span>
+<span class="hljs-addition">+     * @param {String} id 非叶节点id</span>
+</code></pre></article>
+</section>
+<section id="verification">
+  <h2>验证与联调</h2>
+  <h3>评审稿已验证</h3>
+  <p>将上述 Go 代码覆盖到工程的临时副本后，<code>go build</code>、<code>go vet</code> 以及包含现有测试的 <code>go test ./...</code> 均通过。目录与文章请求使用 Gin 和内存 SQLite 验证。MySQL 的快照隔离和真实书籍数据留到开发阶段在开发库核对。</p>
+  <div class="table-wrap"><table><thead><tr><th>检查</th><th>临时验证结果</th></tr></thead><tbody>
+    <tr><td>正确返回公开树</td><td>逐字段比对多层响应，验证同级排序、跨书隔离、隐藏父项剪枝、同名 img 文件保留、空文件夹、文件只含三个公共字段，以及接近午夜的日期格式。</td></tr>
+    <tr><td>异常与空状态</td><td>覆盖隐藏书、缺书、无行、隐藏根、img 根、合法空根、裸数字及溢出 ID，另覆盖多根、孤儿、环、文件作父及数据库查询失败。</td></tr>
+    <tr><td>前端补丁与大 ID</td><td>六份差异已在前端工作树检查并应用到临时副本。通过 Vue、Pinia 与 Axios 的内存测试，验证目录失败后重试、折叠与选中、首叶跳转和文章重试。相邻叶 ID <code>9017199254740996</code>、<code>9017199254740997</code> 在捕获到的请求体中各自保持完整字符串。</td></tr>
+  </tbody></table></div>
+  <h3>实施后的联调验收</h3>
+  <ol>
+    <li>同步修订目录契约中的节点 <code>id</code> 示例和字段表、文件夹专属字段、无公开根的语义和业务码。将文章契约中的 <code>catalogue.id</code> 和 <code>article.id</code> 示例及类型改为字符串，同时更新大整数约定中的迁移状态。</li>
+    <li>用开发配置启动服务，从真实书单取得一个公开书籍 ID。用该 ID 请求目录，在 <code>solar_notes.catalogue</code> 按同一 <code>book_id</code> 核对根、父子关系、日期、显隐和每组兄弟的 <code>sort</code>。数据库比对使用只读查询。</li>
+    <li>浏览器从书单进入该书，核对根简介，展开多层目录，再选择一篇文章并重试。用开发者工具检查两次请求中的 ID 与树上叶 ID 逐位相同，检查首叶跳转后选中项、面包屑和实际滚动位置。空文件夹可显示简介，点击“开启文章”时应无正文请求。</li>
+  </ol>
+</section>
+</main>
+</body>
+</html>

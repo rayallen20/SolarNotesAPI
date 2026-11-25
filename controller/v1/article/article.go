@@ -159,7 +159,7 @@ func Show(c *gin.Context) {
 
 	data := map[string]interface{}{
 		"article": map[string]interface{}{
-			"id":        1,
+			"id":        "1",
 			"content":   content,
 			"createdAt": "2026-01-05",
 		},
