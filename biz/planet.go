@@ -29,7 +29,7 @@ func planetRank(name string) int {
 	return len(planetDisplayOrder)
 }
 
-// List 将已创建的天体按前台展示顺序返回。
+// List 将已创建的天体按前台展示顺序返回
 func (Planet) List(ctx context.Context) ([]Planet, error) {
 	if ctx == nil {
 		return nil, &sys_error.InternalError{Cause: errors.New("biz.Planet.List 缺少请求上下文")}
