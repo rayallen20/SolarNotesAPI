@@ -31,55 +31,55 @@ GET
     "data": {
         "planets": [
             {
-                "id": 1,
+                "id": "1",
                 "intro": "操作系统相关介绍",
                 "name": "Sun",
                 "title": "操作系统"
             },
             {
-                "id": 2,
+                "id": "2",
                 "intro": "数据库相关介绍",
                 "name": "Mercury",
                 "title": "数据库"
             },
             {
-                "id": 3,
+                "id": "3",
                 "intro": "数据库相关介绍",
                 "name": "Venus",
                 "title": "数据库"
             },
             {
-                "id": 4,
+                "id": "4",
                 "intro": "暂无",
                 "name": "Earth",
                 "title": "暂无"
             },
             {
-                "id": 5,
+                "id": "5",
                 "intro": "暂无",
                 "name": "Mars",
                 "title": "暂无"
             },
             {
-                "id": 6,
+                "id": "6",
                 "intro": "暂无",
                 "name": "Jupiter",
                 "title": "暂无"
             },
             {
-                "id": 7,
+                "id": "7",
                 "intro": "暂无",
                 "name": "Saturn",
                 "title": "暂无"
             },
             {
-                "id": 8,
+                "id": "8",
                 "intro": "暂无",
                 "name": "Uranus",
                 "title": "暂无"
             },
             {
-                "id": 9,
+                "id": "9",
                 "intro": "暂无",
                 "name": "Neptune",
                 "title": "暂无"
@@ -107,11 +107,11 @@ GET
 
 | 参数名  |   类型   |                         说明                         |
 |:-------:|:--------:|:----------------------------------------------------:|
-|  `id`   |  `int`   |                        天体id                        |
+|  `id`   | `string` | 天体 ID，取正 `int64` 的十进制字符串，范围为 1 到 9223372036854775807 |
 | `name`  | `string` | 天体名称(前端据此字段值与对应的天体配置对象组合字段) |
 | `title` | `string` |                   天体label的标题                    |
 | `intro` | `string` |                   天体label的介绍                    |
 
 ## 备注
 
-无
+JSON 使用双引号传输天体 ID，例如 `"9007199254740993"`。请求书籍列表时，将该字符串原样传入 `planet.id`，以保留雪花 ID 的精度。

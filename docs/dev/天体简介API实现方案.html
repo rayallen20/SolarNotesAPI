@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>天体简介 API 实现方案 · SolarNotes API</title>
+  <style>
+    :root { color-scheme: light; font-family: "Source Sans 3", system-ui, sans-serif; line-height: 1.7; color: #202f39; background: #f2f5f4; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 54rem; margin: 2rem auto; padding: clamp(1.25rem, 5vw, 3.5rem); background: white; border-top: 5px solid #17685a; }
+    h1, h2 { color: #153e38; line-height: 1.35; }
+    h1 { margin: 0 0 .65rem; font-size: clamp(1.8rem, 4vw, 2.5rem); }
+    h2 { margin: 2.1rem 0 .6rem; font-size: 1.35rem; }
+    p, ol { margin: .65rem 0; }
+    ol { padding-left: 1.5rem; }
+    li + li { margin-top: .4rem; }
+    code { font: .92em/1.55 "IBM Plex Mono", ui-monospace, monospace; overflow-wrap: anywhere; }
+    pre { overflow-x: auto; margin: .8rem 0; padding: .9rem 1rem; border-left: 3px solid #508979; background: #f1f5f4; }
+    pre code { overflow-wrap: normal; }
+    a { color: #17685a; text-underline-offset: .15em; }
+    .route { margin: 0 0 .6rem; color: #17685a; }
+    .refs { font-size: .92rem; }
+    table { width: 100%; border-collapse: collapse; }
+    td, th { padding: .6rem .65rem; border-bottom: 1px solid #d6e2df; text-align: left; vertical-align: top; }
+    th { background: #eaf3ef; }
+    .layers td:first-child { width: 34%; }
+    .source { margin: 1.7rem 0; scroll-margin-top: 1rem; }
+    .source h3 { margin: 0; font-size: 1.04rem; color: #153e38; }
+    .source p { margin: .3rem 0; }
+    .source pre { padding: 1rem; border: 1px solid #d6e2df; background: #f8faf9; tab-size: 4; }
+    .source .hljs-keyword, .source .hljs-type { color: #67369b; }
+    .source .hljs-string, .source .hljs-literal { color: #126350; }
+    .source .hljs-title, .source .hljs-built_in { color: #205d88; }
+    .source .hljs-comment { color: #52665e; }
+    @media (max-width: 40rem) { main { margin: 0; } th, td { padding: .5rem .35rem; } }
+    @media print { main { max-width: none; margin: 0; } tr, pre { break-inside: avoid; } h2 { break-after: avoid; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="route"><code>GET /api/v1/planet/list</code></p>
+    <h1>天体简介 API 实现方案</h1>
+    <p>前台通过这一次请求，把数据库中的标题、简介和主键交给太阳系场景。控制器通过业务层和 DAO 读取 <code>solar_notes.planet</code>。天体主键在 JSON 中使用十进制字符串，前端聚焦天体时将它原样传给书单接口。</p>
+    <p class="refs"><a href="#go-implementation">审阅完整 Go 代码</a> · <a href="../api/天体简介API.md">前台接口契约</a> · <a href="../../controller/v1/planet/planet.go">天体控制器</a> · <a href="配置加载与数据库连接.html">启动与数据库连接</a></p>
+  </header>
+
+  <section>
+    <h2>请求与成功响应</h2>
+    <p>前端发送公开 GET 请求，无需鉴权、查询参数或请求体。成功时返回 HTTP 200，前端检查数字 <code>code === 200</code> 后从 <code>data</code> 解包 <code>planets</code> 数组。以下示例假设库中只有一条天体记录。</p>
+    <pre><code id="success-example">{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "planets": [
+      {"id": "9007199254740993", "name": "Sun", "title": "操作系统", "intro": "操作系统相关介绍"}
+    ]
+  }
+}</code></pre>
+    <p>每项四个字段均取自同一行。<code>id</code> 是正 <code>int64</code> 主键的十进制字符串。前端用区分大小写的 <code>name</code> 匹配场景天体，并将 <code>title</code> 和 <code>intro</code> 用于标签和面板。即使标题或简介为空，响应也保留相应字段。</p>
+    <p class="refs"><a href="../../../SolarNotesFrontend/src/lib/request.js">前端响应解包</a> · <a href="../../../SolarNotesFrontend/src/three/applyBodyMeta.js">场景匹配</a></p>
+  </section>
+
+  <section>
+    <h2>分层与文件改动</h2>
+    <p>一次调用由 <code>controller.List</code> 进入 <code>biz.Planet.List(ctx)</code>，再由 <code>model.Planet.FindAll(ctx)</code> 使用现有 <code>db.DB</code> 查询。沿调用链传入 <code>c.Request.Context()</code>，使客户端取消请求时，数据库查询也能收到取消信号。</p>
+    <table class="layers">
+      <thead><tr><th scope="col">实施文件</th><th scope="col">职责</th></tr></thead>
+      <tbody>
+        <tr><td><code>model/planet.go</code><br>新增</td><td>以 <code>model.Planet</code> 映射单数表 <code>planet</code> 的四列，主键用 <code>int64</code>。<code>FindAll</code> 使用 <code>db.DB.WithContext(ctx)</code> 执行下方查询，返回记录和查询错误。</td></tr>
+        <tr><td><code>biz/planet.go</code><br>新增</td><td>将查询结果映射为天体业务实体，按下节规则排列。查询失败时，用 <code>sys_error.DatabaseError</code> 包装底层原因并向上传递。</td></tr>
+        <tr><td><code>param/resp/v1/planet/list.go</code></td><td>定义列表项 <code>ListPlanetResp</code> 及其 JSON 字段，并以 <code>ListResp.Planets</code> 承载列表。响应层使用 <code>string</code> 保存格式化后的天体主键。</td></tr>
+        <tr><td><code>controller/v1/planet/planet.go</code><br>修改 <code>List</code></td><td>移除硬编码列表，调用业务层，逐项组装响应。预先初始化空切片，成功时将 <code>map[string]any{"planets": list.Planets}</code> 交给现有 <code>RespBody.Success</code>。</td></tr>
+        <tr><td><code>sys_error/</code>、<code>resp_body/resp_body.go</code><br>补充错误处理</td><td><code>sys_error</code> 定义数据库和内部错误，保留底层原因供诊断。控制器用 <code>errors.As</code> 识别数据库错误，由 <code>resp_body</code> 统一输出公开消息、业务码和空对象。</td></tr>
+      </tbody>
+    </table>
+    <p>沿用 <code>main.go</code> 已有路由和 <code>db</code> 层建立的连接。这个全量读取接口无需请求 DTO、分页器或数据库迁移。</p>
+    <p class="refs"><a href="../../main.go">前台路由</a> · <a href="../../db/connect.go">连接层</a> · <a href="../../../SolarNotesAdminAPI/controller/v1/planet/planet.go">后台控制器参考</a> · <a href="../../../SolarNotesAdminAPI/param/resp/v1/planet/list.go">后台响应结构参考</a></p>
+  </section>
+
+  <section>
+    <h2>查询范围与展示顺序</h2>
+    <pre><code>SELECT id, name, title, intro
+FROM planet
+ORDER BY id ASC;</code></pre>
+    <p>原接口给出了九项示例，未约定返回数量或顺序。本方案沿用管理后台列表的规则，返回所有已建天体，包括尚未关联书籍的天体。DAO 先按主键升序读取，业务层再按以下规则组织结果。</p>
+    <ol>
+      <li>已建的标准名称按 <code>Sun → Mercury → Venus → Earth → Mars → Jupiter → Saturn → Uranus → Neptune</code> 排列。缺少某个天体时直接跳过，所有返回的 ID 均来自实际记录。</li>
+      <li>数据库中若有其他名称，附在标准天体之后，保持主键升序。前端只给名称完全匹配的场景对象赋值。</li>
+      <li>空表属于查询成功，返回 <code>{"code":200,"message":"success","data":{"planets":[]}}</code>。</li>
+    </ol>
+    <p class="refs"><a href="../../../SolarNotesAdminAPI/model/planet.go">后台 DAO 的 FindAll</a> · <a href="../../../SolarNotesAdminAPI/biz/planet.go">后台业务层的 List</a></p>
+  </section>
+
+  <section>
+    <h2>真实主键与书单联调</h2>
+    <p>后台创建天体时生成 64 位雪花 ID。天体列表控制器用 <code>strconv.FormatInt(planet.ID, 10)</code> 输出其十进制文本。场景将这个字符串保存到 <code>userData.id</code>，用户聚焦天体时，前端直接用它构造 <code>POST /api/v1/book/list</code> 的请求体。</p>
+    <pre><code id="book-request-example">{"planet":{"id":"9007199254740993"}}</code></pre>
+    <p>书单入参用 <code>json:"id,string"</code> 将带引号的十进制值精确解码为 <code>int64</code>，再用 <code>gt=0</code> 校验。发送 JSON 数字、零、负数或超出 <code>9223372036854775807</code> 的值均返回参数校验码 <code>10101</code>。书单响应的 <code>bookList[].id</code> 表示书籍主键，其 JSON 类型为整数。</p>
+    <p class="refs"><a href="../../../SolarNotesAdminAPI/biz/planet.go">后台发号</a> · <a href="../../../SolarNotesFrontend/src/composables/useBookListSync.js">聚焦后读取 ID</a> · <a href="../../../SolarNotesFrontend/src/api/book.js">前端书单请求</a> · <a href="../../param/req/v1/book/list.go">前台书单入参</a></p>
+  </section>
+
+  <section>
+    <h2>失败响应</h2>
+    <p>前台接口文档只定义了成功响应。当前前台响应包已有成功码和参数校验码，此处建议新增后台已有的两类错误映射，继续使用 HTTP 200，由业务码驱动前端的失败分支。</p>
+    <table>
+      <thead><tr><th scope="col">情形</th><th scope="col">业务码</th><th scope="col">公开消息与载荷</th></tr></thead>
+      <tbody>
+        <tr><td>请求期间查询数据库失败</td><td><code>10201</code></td><td>“数据库操作失败,请稍后重试”，<code>data: {}</code></td></tr>
+        <tr><td>其他内部处理错误</td><td><code>500</code></td><td>“服务暂时不可用,请稍后重试”，<code>data: {}</code></td></tr>
+      </tbody>
+    </table>
+    <p>公开消息使用固定文本，SQL、连接细节和底层错误留在服务端。若数据库在进程启动时就无法连接，服务会在监听前退出，此时没有 HTTP 响应。</p>
+    <p class="refs"><a href="../../resp_body/resp_body.go">前台现有响应包装</a> · <a href="../../../SolarNotesAdminAPI/resp_body/resp_body.go">后台错误码映射</a></p>
+  </section>
+
+  <section id="go-implementation">
+    <h2>Go 实现代码</h2>
+    <p>入口沿用已有路由注册 <code>v1.GET("/planet/list", planet.List)</code>。可沿控制器、业务层、DAO 的顺序审阅，再核对天体响应与书单入参。</p>
+    <nav class="refs" aria-label="实现代码文件"><a href="#src-controller">控制器</a> · <a href="#src-business">业务层</a> · <a href="#src-model">DAO</a> · <a href="#src-response">响应 DTO</a> · <a href="#src-book-request">书单入参</a> · <a href="#src-database-error">数据库错误</a> · <a href="#src-internal-error">内部错误</a> · <a href="#src-envelope">响应包装</a></nav>
+
+    <article class="source" id="src-controller">
+      <h3><code>controller/v1/planet/planet.go</code></h3>
+      <p>传入请求上下文，识别数据库错误，将业务实体映射为公开字段。主键在这里格式化为十进制文本，空结果编码为数组。</p>
+      <pre><code class="language-go" data-file="controller/v1/planet/planet.go"><span class="hljs-keyword">package</span> planet
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;errors&quot;</span>
+	<span class="hljs-string">&quot;net/http&quot;</span>
+	<span class="hljs-string">&quot;strconv&quot;</span>
+
+	<span class="hljs-string">&quot;SolarNotesAPI/biz&quot;</span>
+	respPlanet <span class="hljs-string">&quot;SolarNotesAPI/param/resp/v1/planet&quot;</span>
+	<span class="hljs-string">&quot;SolarNotesAPI/resp_body&quot;</span>
+	<span class="hljs-string">&quot;SolarNotesAPI/sys_error&quot;</span>
+
+	<span class="hljs-string">&quot;github.com/gin-gonic/gin&quot;</span>
+)
+
+<span class="hljs-comment">// List 返回太阳系场景所需的天体简介。</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">List</span><span class="hljs-params">(c *gin.Context)</span></span> {
+	<span class="hljs-keyword">var</span> body resp_body.RespBody
+	<span class="hljs-keyword">var</span> service biz.Planet
+	planets, err := service.List(c.Request.Context())
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">var</span> dbErr *sys_error.DatabaseError
+		<span class="hljs-keyword">if</span> errors.As(err, &amp;dbErr) {
+			body.DBError()
+		} <span class="hljs-keyword">else</span> {
+			body.InternalError()
+		}
+		c.JSON(http.StatusOK, body)
+		<span class="hljs-keyword">return</span>
+	}
+
+	list := respPlanet.ListResp{
+		Planets: <span class="hljs-built_in">make</span>([]respPlanet.ListPlanetResp, <span class="hljs-number">0</span>, <span class="hljs-built_in">len</span>(planets)),
+	}
+	<span class="hljs-keyword">for</span> _, planet := <span class="hljs-keyword">range</span> planets {
+		list.Planets = <span class="hljs-built_in">append</span>(list.Planets, respPlanet.ListPlanetResp{
+			ID:    strconv.FormatInt(planet.ID, <span class="hljs-number">10</span>),
+			Name:  planet.Name,
+			Title: planet.Title,
+			Intro: planet.Intro,
+		})
+	}
+	body.Success(<span class="hljs-keyword">map</span>[<span class="hljs-type">string</span>]any{<span class="hljs-string">&quot;planets&quot;</span>: list.Planets})
+	c.JSON(http.StatusOK, body)
+}</code></pre>
+    </article>
+
+    <article class="source" id="src-business">
+      <h3><code>biz/planet.go</code></h3>
+      <p>查询结果按标准名称的顺序稳定排序。所有未知名称使用相同排序值，因此保留查询时的主键顺序。</p>
+      <pre><code class="language-go" data-file="biz/planet.go"><span class="hljs-keyword">package</span> biz
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;cmp&quot;</span>
+	<span class="hljs-string">&quot;context&quot;</span>
+	<span class="hljs-string">&quot;errors&quot;</span>
+	<span class="hljs-string">&quot;slices&quot;</span>
+
+	<span class="hljs-string">&quot;SolarNotesAPI/model&quot;</span>
+	<span class="hljs-string">&quot;SolarNotesAPI/sys_error&quot;</span>
+)
+
+<span class="hljs-keyword">type</span> Planet <span class="hljs-keyword">struct</span> {
+	ID    <span class="hljs-type">int64</span>
+	Name  <span class="hljs-type">string</span>
+	Title <span class="hljs-type">string</span>
+	Intro <span class="hljs-type">string</span>
+}
+
+<span class="hljs-keyword">var</span> planetDisplayOrder = []<span class="hljs-type">string</span>{
+	<span class="hljs-string">&quot;Sun&quot;</span>, <span class="hljs-string">&quot;Mercury&quot;</span>, <span class="hljs-string">&quot;Venus&quot;</span>, <span class="hljs-string">&quot;Earth&quot;</span>, <span class="hljs-string">&quot;Mars&quot;</span>,
+	<span class="hljs-string">&quot;Jupiter&quot;</span>, <span class="hljs-string">&quot;Saturn&quot;</span>, <span class="hljs-string">&quot;Uranus&quot;</span>, <span class="hljs-string">&quot;Neptune&quot;</span>,
+}
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">planetRank</span><span class="hljs-params">(name <span class="hljs-type">string</span>)</span></span> <span class="hljs-type">int</span> {
+	<span class="hljs-keyword">if</span> index := slices.Index(planetDisplayOrder, name); index &gt;= <span class="hljs-number">0</span> {
+		<span class="hljs-keyword">return</span> index
+	}
+	<span class="hljs-keyword">return</span> <span class="hljs-built_in">len</span>(planetDisplayOrder)
+}
+
+<span class="hljs-comment">// List 将已创建的天体按前台展示顺序返回。</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(Planet)</span></span> List(ctx context.Context) ([]Planet, <span class="hljs-type">error</span>) {
+	<span class="hljs-keyword">if</span> ctx == <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, &amp;sys_error.InternalError{Cause: errors.New(<span class="hljs-string">&quot;biz.Planet.List 缺少请求上下文&quot;</span>)}
+	}
+
+	<span class="hljs-keyword">var</span> dao model.Planet
+	rows, err := dao.FindAll(ctx)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, &amp;sys_error.DatabaseError{Cause: err}
+	}
+
+	planets := <span class="hljs-built_in">make</span>([]Planet, <span class="hljs-number">0</span>, <span class="hljs-built_in">len</span>(rows))
+	<span class="hljs-keyword">for</span> _, row := <span class="hljs-keyword">range</span> rows {
+		planets = <span class="hljs-built_in">append</span>(planets, Planet{
+			ID:    row.ID,
+			Name:  row.Name,
+			Title: row.Title,
+			Intro: row.Intro,
+		})
+	}
+
+	<span class="hljs-comment">// 未知名称的排序值相同。稳定排序会保留 DAO 提供的主键顺序。</span>
+	slices.SortStableFunc(planets, <span class="hljs-function"><span class="hljs-keyword">func</span><span class="hljs-params">(a, b Planet)</span></span> <span class="hljs-type">int</span> {
+		<span class="hljs-keyword">return</span> cmp.Compare(planetRank(a.Name), planetRank(b.Name))
+	})
+	<span class="hljs-keyword">return</span> planets, <span class="hljs-literal">nil</span>
+}</code></pre>
+    </article>
+
+    <article class="source" id="src-model">
+      <h3><code>model/planet.go</code></h3>
+      <p>GORM 从目标切片的元素类型推导表名，沿用启动时设置的单数表命名策略。查询只选择响应需要的四列。</p>
+      <pre><code class="language-go" data-file="model/planet.go"><span class="hljs-keyword">package</span> model
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;context&quot;</span>
+	<span class="hljs-string">&quot;errors&quot;</span>
+
+	<span class="hljs-string">&quot;SolarNotesAPI/db&quot;</span>
+)
+
+<span class="hljs-comment">// Planet 映射 planet 表中简介接口需要的列。</span>
+<span class="hljs-keyword">type</span> Planet <span class="hljs-keyword">struct</span> {
+	ID    <span class="hljs-type">int64</span>  <span class="hljs-string">`gorm:&quot;column:id;primaryKey;autoIncrement:false&quot;`</span>
+	Name  <span class="hljs-type">string</span> <span class="hljs-string">`gorm:&quot;column:name&quot;`</span>
+	Title <span class="hljs-type">string</span> <span class="hljs-string">`gorm:&quot;column:title&quot;`</span>
+	Intro <span class="hljs-type">string</span> <span class="hljs-string">`gorm:&quot;column:intro&quot;`</span>
+}
+
+<span class="hljs-comment">// FindAll 按主键升序读取所有已创建的天体。</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(Planet)</span></span> FindAll(ctx context.Context) ([]Planet, <span class="hljs-type">error</span>) {
+	<span class="hljs-keyword">if</span> db.DB == <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, errors.New(<span class="hljs-string">&quot;数据库连接尚未初始化&quot;</span>)
+	}
+
+	<span class="hljs-keyword">var</span> rows []Planet
+	err := db.DB.WithContext(ctx).
+		Select(<span class="hljs-string">&quot;id&quot;</span>, <span class="hljs-string">&quot;name&quot;</span>, <span class="hljs-string">&quot;title&quot;</span>, <span class="hljs-string">&quot;intro&quot;</span>).
+		Order(<span class="hljs-string">&quot;id ASC&quot;</span>).
+		Find(&amp;rows).Error
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, err
+	}
+	<span class="hljs-keyword">return</span> rows, <span class="hljs-literal">nil</span>
+}</code></pre>
+    </article>
+
+    <article class="source" id="src-response">
+      <h3><code>param/resp/v1/planet/list.go</code></h3>
+      <p>响应 DTO 用字符串保存天体主键。标题和简介为空字符串时也保留字段。</p>
+      <pre><code class="language-go" data-file="param/resp/v1/planet/list.go"><span class="hljs-keyword">package</span> planet
+
+<span class="hljs-keyword">type</span> ListPlanetResp <span class="hljs-keyword">struct</span> {
+	ID    <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;id&quot;`</span>
+	Name  <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;name&quot;`</span>
+	Title <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;title&quot;`</span>
+	Intro <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;intro&quot;`</span>
+}
+
+<span class="hljs-keyword">type</span> ListResp <span class="hljs-keyword">struct</span> {
+	Planets []ListPlanetResp <span class="hljs-string">`json:&quot;planets&quot;`</span>
+}</code></pre>
+    </article>
+
+    <article class="source" id="src-book-request">
+      <h3><code>param/req/v1/book/list.go</code></h3>
+      <p>请求中的天体 ID 以 JSON 字符串传输，书单控制器使用校验后的正整数。</p>
+      <pre><code class="language-go" data-file="param/req/v1/book/list.go"><span class="hljs-keyword">package</span> book
+
+<span class="hljs-keyword">type</span> ListReq <span class="hljs-keyword">struct</span> {
+	Planet *ListPlanet <span class="hljs-string">`json:&quot;planet&quot; binding:&quot;required&quot;`</span>
+}
+
+<span class="hljs-keyword">type</span> ListPlanet <span class="hljs-keyword">struct</span> {
+	ID <span class="hljs-type">int64</span> <span class="hljs-string">`json:&quot;id,string&quot; binding:&quot;gt=0&quot;`</span>
+}</code></pre>
+    </article>
+
+    <article class="source" id="src-database-error">
+      <h3><code>sys_error/database_error.go</code></h3>
+      <p>业务层包装 DAO 返回的错误，控制器可以按类型识别。Unwrap 保留 Go 错误链。</p>
+      <pre><code class="language-go" data-file="sys_error/database_error.go"><span class="hljs-keyword">package</span> sys_error
+
+<span class="hljs-keyword">const</span> DatabaseMessage = <span class="hljs-string">&quot;数据库操作失败,请稍后重试&quot;</span>
+
+<span class="hljs-comment">// DatabaseError 保留查询错误的原始原因，Error 返回对外消息。</span>
+<span class="hljs-keyword">type</span> DatabaseError <span class="hljs-keyword">struct</span> {
+	Cause <span class="hljs-type">error</span>
+}
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(e *DatabaseError)</span></span> Error() <span class="hljs-type">string</span> { <span class="hljs-keyword">return</span> DatabaseMessage }
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(e *DatabaseError)</span></span> Unwrap() <span class="hljs-type">error</span> { <span class="hljs-keyword">return</span> e.Cause }</code></pre>
+    </article>
+
+    <article class="source" id="src-internal-error">
+      <h3><code>sys_error/internal_error.go</code></h3>
+      <p>调用方缺少请求上下文时返回此类型，内部原因保存在 Cause 中。</p>
+      <pre><code class="language-go" data-file="sys_error/internal_error.go"><span class="hljs-keyword">package</span> sys_error
+
+<span class="hljs-keyword">const</span> InternalMessage = <span class="hljs-string">&quot;服务暂时不可用,请稍后重试&quot;</span>
+
+<span class="hljs-keyword">type</span> InternalError <span class="hljs-keyword">struct</span> {
+	Cause <span class="hljs-type">error</span>
+}
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(e *InternalError)</span></span> Error() <span class="hljs-type">string</span> { <span class="hljs-keyword">return</span> InternalMessage }
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(e *InternalError)</span></span> Unwrap() <span class="hljs-type">error</span> { <span class="hljs-keyword">return</span> e.Cause }</code></pre>
+    </article>
+
+    <article class="source" id="src-envelope">
+      <h3><code>resp_body/resp_body.go</code></h3>
+      <p>在原文件中增加两个业务码和对应的响应方法。Success 和 ValidateFailed 仍可供已有控制器调用。</p>
+      <pre><code class="language-go" data-file="resp_body/resp_body.go"><span class="hljs-keyword">package</span> resp_body
+
+<span class="hljs-keyword">import</span> <span class="hljs-string">&quot;SolarNotesAPI/sys_error&quot;</span>
+
+<span class="hljs-comment">// RespBody 本结构体用于定义响应体结构</span>
+<span class="hljs-keyword">type</span> RespBody <span class="hljs-keyword">struct</span> {
+	Code    <span class="hljs-type">int</span>                    <span class="hljs-string">`json:&quot;code&quot;`</span>    <span class="hljs-comment">// Code 响应体中的状态码部分</span>
+	Message <span class="hljs-type">string</span>                 <span class="hljs-string">`json:&quot;message&quot;`</span> <span class="hljs-comment">// Message 响应体中的消息部分</span>
+	Data    <span class="hljs-keyword">map</span>[<span class="hljs-type">string</span>]<span class="hljs-keyword">interface</span>{} <span class="hljs-string">`json:&quot;data&quot;`</span>    <span class="hljs-comment">// Data 响应体中的数据载荷部分</span>
+}
+
+<span class="hljs-comment">// 响应码规则:</span>
+<span class="hljs-comment">// 200: 成功响应</span>
+<span class="hljs-comment">// 10<span class="hljs-doctag">XXX:</span> 系统级别错误</span>
+<span class="hljs-comment">// 101XX: 参数校验错误</span>
+<span class="hljs-keyword">const</span> (
+	ServiceInternalErrorCode = <span class="hljs-number">500</span>
+	DBErrorCode              = <span class="hljs-number">10201</span>
+	SUCCESS                  = <span class="hljs-number">200</span>   <span class="hljs-comment">// SUCCESS 成功响应</span>
+	ValidateFailed           = <span class="hljs-number">10101</span> <span class="hljs-comment">// ValidateFailed 参数校验失败</span>
+)
+
+<span class="hljs-comment">// Success 本方法用于定义成功响应时的响应体</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(r *RespBody)</span></span> Success(data <span class="hljs-keyword">map</span>[<span class="hljs-type">string</span>]<span class="hljs-keyword">interface</span>{}) {
+	r.Code = SUCCESS
+	r.Message = <span class="hljs-string">&quot;success&quot;</span>
+	r.Data = data
+}
+
+<span class="hljs-comment">// ValidateFailed 本方法用于定义参数校验失败时的响应体</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(r *RespBody)</span></span> ValidateFailed(err <span class="hljs-type">error</span>) {
+	r.Code = ValidateFailed
+	r.Message = err.Error()
+	r.Data = <span class="hljs-keyword">map</span>[<span class="hljs-type">string</span>]<span class="hljs-keyword">interface</span>{}{}
+}
+
+<span class="hljs-comment">// DBError 和 InternalError 仅输出公开消息。</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(r *RespBody)</span></span> DBError() {
+	r.failure(DBErrorCode, sys_error.DatabaseMessage)
+}
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(r *RespBody)</span></span> InternalError() {
+	r.failure(ServiceInternalErrorCode, sys_error.InternalMessage)
+}
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(r *RespBody)</span></span> failure(code <span class="hljs-type">int</span>, message <span class="hljs-type">string</span>) {
+	r.Code = code
+	r.Message = message
+	r.Data = <span class="hljs-keyword">map</span>[<span class="hljs-type">string</span>]any{}
+}</code></pre>
+    </article>
+  </section>
+
+  <section>
+    <h2>实施后的验收</h2>
+    <p>实库联调中，<code>solar_notes.planet</code> 返回的 9 个主键均超过 JavaScript 安全整数上限。用 JavaScript 解析天体响应并生成书单请求后，9 个字符串均与 SQL 查询的主键逐位相同，9 次书单请求全部成功。裸数字及超出正 <code>int64</code> 范围的字符串都返回了 <code>10101</code>。</p>
+    <pre><code>curl -sS -i http://127.0.0.1:4061/api/v1/planet/list</code></pre>
+    <table>
+      <thead><tr><th scope="col">场景</th><th scope="col">检查项</th></tr></thead>
+      <tbody>
+        <tr><td>真实数据</td><td>在测试库中准备一个与 mock 不同的标题，且该天体没有关联书籍。调用接口，核对真实主键、名称、标题及简介，确认 HTTP 200、数字业务码 200 和四个字段的 JSON 类型。</td></tr>
+        <tr><td>部分天体与顺序</td><td>用打乱主键顺序的 <code>Earth</code>、<code>Sun</code> 和两条非标准名称记录，预期先得到 <code>Sun</code>、<code>Earth</code>，再得到按 ID 升序的两条记录，总数为四。</td></tr>
+        <tr><td>空表与查询故障</td><td>用空数据集验证成功码和空数组。模拟 DAO 查询失败时，核对业务码 <code>10201</code>、空对象及固定公开消息。</td></tr>
+        <tr><td>书单联调</td><td>使用大于 JavaScript 安全整数上限的真实主键，对照数据库十进制原文、列表响应中的字符串及书单请求里的 <code>planet.id</code>，三处须逐位一致。字符串请求应成功，把该字段改为 JSON 数字重发，应收到 <code>10101</code>。</td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+</body>
+</html>

@@ -20,8 +20,7 @@ func List(c *gin.Context) {
 		return
 	}
 
-	planetId := req.Planet.Id
-	if *planetId == 2 {
+	if req.Planet.ID == 2 {
 		data := map[string]interface{}{
 			"bookList": []map[string]interface{}{},
 		}

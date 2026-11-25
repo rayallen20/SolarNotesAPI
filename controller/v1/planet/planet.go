@@ -1,75 +1,45 @@
 package planet
 
 import (
-	"SolarNotesAPI/resp_body"
+	"errors"
 	"net/http"
+	"strconv"
+
+	"SolarNotesAPI/biz"
+	respPlanet "SolarNotesAPI/param/resp/v1/planet"
+	"SolarNotesAPI/resp_body"
+	"SolarNotesAPI/sys_error"
 
 	"github.com/gin-gonic/gin"
 )
 
-// List 天体简介API
+// List 返回太阳系场景所需的天体简介。
 func List(c *gin.Context) {
-	respBody := &resp_body.RespBody{}
-
-	data := map[string]interface{}{
-		"planets": []map[string]interface{}{
-			{
-				"id":    1,
-				"name":  "Sun",
-				"title": "操作系统",
-				"intro": "操作系统相关介绍",
-			},
-			{
-				"id":    2,
-				"name":  "Mercury",
-				"title": "数据库",
-				"intro": "数据库相关介绍",
-			},
-			{
-				"id":    3,
-				"name":  "Venus",
-				"title": "数据库",
-				"intro": "数据库相关介绍",
-			},
-			{
-				"id":    4,
-				"name":  "Earth",
-				"title": "暂无",
-				"intro": "暂无",
-			},
-			{
-				"id":    5,
-				"name":  "Mars",
-				"title": "暂无",
-				"intro": "暂无",
-			},
-			{
-				"id":    6,
-				"name":  "Jupiter",
-				"title": "暂无",
-				"intro": "暂无",
-			},
-			{
-				"id":    7,
-				"name":  "Saturn",
-				"title": "暂无",
-				"intro": "暂无",
-			},
-			{
-				"id":    8,
-				"name":  "Uranus",
-				"title": "暂无",
-				"intro": "暂无",
-			},
-			{
-				"id":    9,
-				"name":  "Neptune",
-				"title": "暂无",
-				"intro": "暂无",
-			},
-		},
+	var body resp_body.RespBody
+	var service biz.Planet
+	planets, err := service.List(c.Request.Context())
+	if err != nil {
+		var dbErr *sys_error.DatabaseError
+		if errors.As(err, &dbErr) {
+			body.DBError()
+		} else {
+			body.InternalError()
+		}
+		c.JSON(http.StatusOK, body)
+		return
 	}
 
-	respBody.Success(data)
-	c.JSON(http.StatusOK, respBody)
+	list := respPlanet.ListResp{
+		Planets: make([]respPlanet.ListPlanetResp, 0, len(planets)),
+	}
+	for _, planet := range planets {
+		list.Planets = append(list.Planets, respPlanet.ListPlanetResp{
+			ID:    strconv.FormatInt(planet.ID, 10),
+			Name:  planet.Name,
+			Title: planet.Title,
+			Intro: planet.Intro,
+		})
+	}
+	body.Success(map[string]any{"planets": list.Planets})
+	c.JSON(http.StatusOK, body)
 }
