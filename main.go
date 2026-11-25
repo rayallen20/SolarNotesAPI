@@ -1,16 +1,39 @@
 package main
 
 import (
+	"log"
+
+	"SolarNotesAPI/conf"
 	"SolarNotesAPI/controller/v1/article"
 	"SolarNotesAPI/controller/v1/book"
 	"SolarNotesAPI/controller/v1/catalogue"
 	"SolarNotesAPI/controller/v1/planet"
+	"SolarNotesAPI/db"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
+	cfg, err := conf.Load()
+	if err != nil {
+		return err
+	}
+	if err := db.Connect(cfg.Database); err != nil {
+		return err
+	}
+	pool, err := db.DB.DB()
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
 	r := gin.Default()
 
 	// 使用跨域中间件
@@ -48,5 +71,5 @@ func main() {
 		v1.POST("/article/show", article.Show)
 	}
 
-	r.Run("0.0.0.0:4061")
+	return r.Run("0.0.0.0:" + cfg.Service.Port)
 }

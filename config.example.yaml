@@ -1,0 +1,11 @@
+# 前台 HTTP 服务
+service:
+  port: "4061"
+
+# MySQL 连接信息，复制到对应环境的配置文件后填写
+database:
+  host: "127.0.0.1"
+  port: "3306"
+  user: "solar_notes"
+  password: ""
+  name: "solar_notes"

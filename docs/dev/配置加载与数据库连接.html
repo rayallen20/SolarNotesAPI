@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>配置加载与数据库连接 · SolarNotes API</title>
+  <style>
+    :root { color-scheme: light; font-family: "Source Sans 3", system-ui, sans-serif; color: #202f39; background: #f2f5f4; line-height: 1.7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 54rem; margin: 2rem auto; padding: clamp(1.25rem, 5vw, 3.5rem); background: white; border-top: 5px solid #17685a; }
+    h1, h2 { line-height: 1.35; color: #153e38; }
+    h1 { font-size: clamp(1.8rem, 4vw, 2.5rem); margin: 0 0 .5rem; }
+    h2 { font-size: 1.32rem; margin: 2rem 0 .6rem; }
+    p, ol { margin: .6rem 0; }
+    li + li { margin-top: .45rem; }
+    table { width: 100%; border-collapse: collapse; }
+    td, th { padding: .55rem .65rem; text-align: left; vertical-align: top; border-bottom: 1px solid #d6e2df; }
+    th { background: #eaf3ef; }
+    code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .92em; overflow-wrap: anywhere; }
+    pre { padding: 1rem; overflow-x: auto; background: #f1f5f4; border-left: 3px solid #4b8677; }
+    a { color: #17685a; }
+    @media (max-width: 40rem) { main { margin: 0; } ol { padding-left: 1.4rem; } }
+    @media print { body { background: white; } main { margin: 0; max-width: none; } h2 { break-after: avoid; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>配置加载与数据库连接</h1>
+    <p>SolarNotes 前台 API 启动时先选择环境、校验配置并连接 MySQL。数据库就绪后，Gin 才在配置的端口监听请求。</p>
+  </header>
+
+  <section>
+    <h2>选择运行环境</h2>
+    <table>
+      <thead><tr><th scope="col">用途</th><th scope="col">根目录文件</th><th scope="col">加载条件</th></tr></thead>
+      <tbody>
+        <tr><td>开发</td><td><code>config.dev.yaml</code></td><td><code>SOLAR_NOTES_ENV</code> 未设置、为空或为 <code>dev</code></td></tr>
+        <tr><td>生产</td><td><code>config.prod.yaml</code></td><td><code>SOLAR_NOTES_ENV=prod</code></td></tr>
+        <tr><td>示例</td><td><a href="../../config.example.yaml"><code>config.example.yaml</code></a></td><td>部署时复制为对应环境的文件，并填写实际连接信息</td></tr>
+      </tbody>
+    </table>
+    <p>服务先在可执行文件所在目录查找选中的文件，文件不存在时再查工作目录。指定其他环境值或找不到对应配置时，进程启动失败。开发和生产文件包含实际凭据，由 Git 忽略。</p>
+  </section>
+
+  <section>
+    <h2>配置字段</h2>
+    <pre><code>service:
+  port: "4061"
+database:
+  host: "127.0.0.1"
+  port: "3306"
+  user: "solar_notes"
+  password: ""
+  name: "solar_notes"</code></pre>
+    <p><code>service.port</code> 是 HTTP 监听端口。<code>database</code> 中的五个字段均为必填项，两个端口均须在 1–65535 之间。示例中的密码留空，使用前须填写。当前提供的开发和生产连接目标均为 <code>192.168.1.60:3306/solar_notes</code>，两个文件可以独立修改。</p>
+  </section>
+
+  <section>
+    <h2>从进程启动到 HTTP 就绪</h2>
+    <ol>
+      <li><a href="../../conf"><code>conf</code></a> 选择环境并解析 YAML。字段名拼错、必填项缺失或端口无效时，返回配置错误。</li>
+      <li><a href="../../db"><code>db</code></a> 根据配置建立 GORM/MySQL 连接，启用单数表名、<code>utf8mb4</code> 和本地时区的时间解析。连接池最多打开 10 个连接，最多保留 5 个空闲连接，单个连接最长使用 1 小时。</li>
+      <li><a href="../../main.go"><code>main.go</code></a> 在连接成功后启动 HTTP 服务。数据库不可达、认证失败或库名不存在时，进程以非零状态退出。连接层只管理数据库连接，业务查询由后续的 DAO 层负责。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>启动与验收</h2>
+    <p>在项目根目录选择一条命令启动服务。两个环境默认都监听 <code>4061</code>，切换前先停止当前进程。</p>
+    <pre><code># 开发环境
+go run .
+
+# 生产环境
+SOLAR_NOTES_ENV=prod go run .</code></pre>
+    <p>在另一终端请求已注册的天体列表接口。收到 HTTP 200 和业务码 200 表示服务已完成数据库初始化并开始处理请求。此阶段的业务数据仍来自现有 mock。</p>
+    <pre><code>curl -fsS http://127.0.0.1:4061/api/v1/planet/list</code></pre>
+    <p>配置错误可用 <code>SOLAR_NOTES_ENV=staging go run .</code> 验证。验证连接失败时，可将示例复制到临时目录，与编译后的二进制放在一起，填写测试凭据并指定一个未监听的数据库端口。预期两种情况都在 HTTP 开始监听前退出。</p>
+    <p><strong>本次验收结果</strong>　开发和生产配置均已实际连接 <code>solar_notes</code>，天体列表接口在两次启动中均返回 HTTP 200 和业务码 200。缺少配置文件、环境值无效、密码为空、端口越界和数据库不可达时，服务均在监听前退出。</p>
+  </section>
+</main>
+</body>
+</html>
