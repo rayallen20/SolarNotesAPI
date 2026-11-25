@@ -1,0 +1,896 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>获取文章 API 实现方案 · SolarNotes API</title><style>
+    :root { color-scheme: light; font-family: "Source Sans 3", system-ui, sans-serif; line-height: 1.7; color: #202f39; background: #f2f5f4; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 55rem; margin: 2rem auto; padding: clamp(1.25rem, 5vw, 3.5rem); background: white; border-top: 5px solid #17685a; }
+    h1, h2, h3 { line-height: 1.35; color: #153e38; }
+    h1 { margin: 0 0 .7rem; font-size: clamp(1.8rem, 4vw, 2.5rem); }
+    h2 { margin: 2rem 0 .65rem; font-size: 1.35rem; }
+    h3 { margin: 1.25rem 0 .4rem; font-size: 1.04rem; }
+    p, ol { margin: .6rem 0; }
+    ol { padding-left: 1.4rem; }
+    li + li { margin-top: .35rem; }
+    a { color: #17685a; text-underline-offset: .15em; }
+    code { font: .92em/1.55 "IBM Plex Mono", ui-monospace, monospace; overflow-wrap: anywhere; }
+    pre { margin: .6rem 0 1rem; padding: .8rem 1rem; overflow-x: auto; border-left: 3px solid #508979; background: #f1f5f4; tab-size: 4; }
+    pre code { overflow-wrap: normal; }
+    table { width: 100%; border-collapse: collapse; }
+    td, th { padding: .55rem .65rem; text-align: left; vertical-align: top; border-bottom: 1px solid #d6e2df; }
+    th { background: #eaf3ef; }
+    .route, .refs { font-size: .93rem; }
+    .route { color: #17685a; }
+    .source { scroll-margin-top: 1rem; }
+    .source pre { border: 1px solid #d6e2df; background: #f8faf9; }
+    .hljs-keyword, .hljs-type { color: #67369b; }
+    .hljs-string, .hljs-literal { color: #126350; }
+    .hljs-title, .hljs-built_in { color: #205d88; }
+    .hljs-comment { color: #52665e; }
+    @media (max-width: 40rem) { main { margin: 0; } th, td { padding: .45rem .35rem; } }
+    @media print { main { max-width: none; margin: 0; } h2, h3 { break-after: avoid; } tr { break-inside: avoid; } }
+  
+    main { max-width: 62rem; }
+    nav { display: flex; flex-wrap: wrap; gap: .35rem 1.15rem; margin: .8rem 0; }
+    .file { margin: .65rem 0; border: 1px solid #d1dfd9; border-radius: .25rem; padding: .55rem .8rem; }
+    .file[open] summary { margin-bottom: .45rem; }
+    summary { cursor: pointer; color: #174f45; }
+    .scroll { overflow-x: auto; }
+    .file pre { margin-bottom: .35rem; }
+    .wrap pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .wrap pre code { overflow-wrap: anywhere; }
+    .hint { padding: .65rem .9rem; background: #edf6f2; border-left: 3px solid #22735f; }
+    .hljs-addition { color: #145c3c; background: #e4f5ea; }
+    .hljs-deletion { color: #873e37; background: #fbe9e7; }
+    @media print { pre { white-space: pre-wrap; overflow-wrap: anywhere; } }
+</style></head><body><main>
+<header><p class="route"><code>POST /api/v1/article/show</code> · 实现评审稿</p>
+<h1>获取文章 API 实现方案</h1>
+<p>读者点选公开目录树中的文件时，接口使用叶节点 ID 查找文章，读取 UTF-8 Markdown，将本地图片引用改写为 Nginx 可访问的绝对 URL，最后返回文章自身的 ID、正文和创建日期。</p>
+<p>本轮已更新开发、生产和示例配置及其加载校验。下文的文章处理代码供开发前评审；当前运行的文章接口仍返回 mock。</p>
+<nav aria-label="文档导航"><a href="#contract">接口契约</a> <a href="#nginx">Nginx 与配置</a> <a href="#rewrite">图片路径实例</a> <a href="#flow">数据读取与错误</a> <a href="#code">候选代码</a> <a href="#frontend">前端变更</a> <a href="#checks">验证与验收</a></nav></header>
+<section id="contract"><h2>接口契约</h2>
+
+<p><code>Content-Type: application/json</code>。输入沿用目录树叶节点的 <code>id</code>，按正 <code>int64</code> 的十进制字符串传输。成功响应中的 <code>article.id</code> 来自 <code>article.id</code>，<code>createdAt</code> 来自 <code>article.created_at</code>，直接按该行的日历日期格式化为 <code>YYYY-MM-DD</code>。</p>
+<h3>请求</h3><pre><code class="language-json"><span class="hljs-punctuation">{</span><span class="hljs-attr">&quot;catalogue&quot;</span><span class="hljs-punctuation">:</span><span class="hljs-punctuation">{</span><span class="hljs-attr">&quot;id&quot;</span><span class="hljs-punctuation">:</span><span class="hljs-string">&quot;2123684178049376261&quot;</span><span class="hljs-punctuation">}</span><span class="hljs-punctuation">}</span></code></pre>
+<h3>预期响应</h3><p>下例取一篇公开文章的真实关联 ID、日期和图片引用。为便于对照，示例的 <code>content</code> 只展示含图的一行，实际接口返回完整正文。</p>
+<div class="wrap"><pre><code class="language-json"><span class="hljs-punctuation">{</span>
+  <span class="hljs-attr">&quot;code&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-number">200</span><span class="hljs-punctuation">,</span>
+  <span class="hljs-attr">&quot;message&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;success&quot;</span><span class="hljs-punctuation">,</span>
+  <span class="hljs-attr">&quot;data&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-punctuation">{</span>
+    <span class="hljs-attr">&quot;article&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-punctuation">{</span>
+      <span class="hljs-attr">&quot;id&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;2123684178049376262&quot;</span><span class="hljs-punctuation">,</span>
+      <span class="hljs-attr">&quot;content&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;![查询请求执行过程](http://192.168.1.60:8080/testUpload/%E7%AC%AC1%E7%AB%A0%20%E8%A3%85%E4%BD%9C%E8%87%AA%E5%B7%B1%E6%98%AF%E4%B8%AA%E5%B0%8F%E7%99%BD--%E5%88%9D%E8%AF%86MySQL/6.%20%E6%9C%8D%E5%8A%A1%E5%99%A8%E5%A4%84%E7%90%86%E5%AE%A2%E6%88%B7%E7%AB%AF%E8%AF%B7%E6%B1%82/img/%E6%9F%A5%E8%AF%A2%E8%AF%B7%E6%B1%82%E6%89%A7%E8%A1%8C%E8%BF%87%E7%A8%8B.jpg)&quot;</span><span class="hljs-punctuation">,</span>
+      <span class="hljs-attr">&quot;createdAt&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-string">&quot;2026-11-20&quot;</span>
+    <span class="hljs-punctuation">}</span>
+  <span class="hljs-punctuation">}</span>
+<span class="hljs-punctuation">}</span></code></pre></div>
+<p><a href="../api/获取文章API.md">当前文章 API 契约</a> · <a href="../api/README.md">大整数传输约定</a> · <a href="../api/获取目录API.md">上游目录契约</a></p></section>
+<section id="nginx"><h2>Nginx 映射与已生效的配置</h2>
+
+<p>通过 SSH 在 <code>192.168.1.60</code> 检查 <code>nginx -T</code> 的生效配置，定位到 <code>/etc/nginx/sites-enabled/solar-assets.conf</code>。以下是与图片路径有关的有效指令。</p>
+<pre><code class="language-nginx"><span class="hljs-section">server</span> {
+    <span class="hljs-attribute">listen</span> <span class="hljs-number">8080</span>;
+    <span class="hljs-attribute">server_name</span> _;
+    <span class="hljs-attribute">root</span> /solar-notes-data;
+    <span class="hljs-section">location</span> <span class="hljs-regexp">~ /\.</span> { <span class="hljs-attribute">deny</span> all; }
+    <span class="hljs-section">location</span> <span class="hljs-regexp">~* \.md$</span> { <span class="hljs-attribute">deny</span> all; }
+    <span class="hljs-section">location</span> / { <span class="hljs-attribute">try_files</span> <span class="hljs-variable">$uri</span> =<span class="hljs-number">404</span>; }
+}</code></pre>
+<p>URL 的 <code>/</code> 直接对应文件树 <code>/solar-notes-data/</code>。保留从这个根到图片的全部子目录，去掉物理根前缀。Nginx 拒绝隐藏路径和 Markdown 文件，因此 API 进程直接从可读文件系统取正文，浏览器只向资源站取图。</p>
+<h3>三份 YAML 共用以下配置</h3>
+<pre><code class="language-yaml"><span class="hljs-attr">asset:</span>
+  <span class="hljs-attr">base_url:</span> <span class="hljs-string">&quot;http://192.168.1.60:8080&quot;</span>
+
+<span class="hljs-attr">storage:</span>
+  <span class="hljs-attr">root_dir:</span> <span class="hljs-string">&quot;/solar-notes-data&quot;</span></code></pre>
+<p><code>conf.Load()</code> 按 <code>SOLAR_NOTES_ENV</code> 加载开发或生产配置，继续严格检查 YAML 字段。新增的 <code>cfg.Asset.BaseURL</code> 是带主机的 HTTP(S) 地址，可含路径前缀，加载后去尾斜杠，不接受用户信息、查询串或片段。<code>cfg.Storage.RootDir</code> 必须为绝对路径，实际读文章时再打开目录。开发与生产各使用本地配置文件，示例在版本库中提供同样的资源映射。已有部署更新程序时，要在对应环境的 YAML 同步补入这两段。</p>
+<p class="hint"><strong>部署条件</strong>　实库中 38 条公开文章记录的 <code>article.path</code> 均为 <code>/solar-notes-data/...</code> 绝对路径。本机目前没有这个挂载点。联调时可在已有文件树的服务器运行 API，或让 API 在同一绝对路径看到只读挂载。单独更改图片域名不能提供正文文件。今后若写入根相对路径，候选读取器同样支持。</p>
+<p><a href="../../conf/config.go">配置类型与验证</a> · <a href="../../conf/load.go">配置加载</a> · <a href="../../config.example.yaml">示例配置</a> · <a href="../../../SolarNotesAdminAPI/conf/asset.go">后台资源配置参考</a></p></section>
+<section id="rewrite"><h2>从文章所在目录推导图片 URL</h2>
+
+<p>已按公开目录树关联文章逐一核对服务器上的 38 份正文，找到两处 Markdown 图片标记，均为 <code>./img/中文文件名.jpg</code>。下面是其中一处。</p>
+<div class="scroll"><table><thead><tr><th>环节</th><th>真实示例</th></tr></thead><tbody><tr><td>数据库中的正文文件</td><td><code>/solar-notes-data/testUpload/第1章 装作自己是个小白--初识MySQL/6. 服务器处理客户端请求/0. 大致过程.md</code></td></tr><tr><td>原文中的引用</td><td><code>![查询请求执行过程](./img/查询请求执行过程.jpg)</code></td></tr><tr><td>图片相对 Nginx 根的路径</td><td><code>testUpload/第1章 装作自己是个小白--初识MySQL/6. 服务器处理客户端请求/img/查询请求执行过程.jpg</code></td></tr><tr><td>浏览器实际请求</td><td><a href="http://192.168.1.60:8080/testUpload/%E7%AC%AC1%E7%AB%A0%20%E8%A3%85%E4%BD%9C%E8%87%AA%E5%B7%B1%E6%98%AF%E4%B8%AA%E5%B0%8F%E7%99%BD--%E5%88%9D%E8%AF%86MySQL/6.%20%E6%9C%8D%E5%8A%A1%E5%99%A8%E5%A4%84%E7%90%86%E5%AE%A2%E6%88%B7%E7%AB%AF%E8%AF%B7%E6%B1%82/img/%E6%9F%A5%E8%AF%A2%E8%AF%B7%E6%B1%82%E6%89%A7%E8%A1%8C%E8%BF%87%E7%A8%8B.jpg">查看该图片</a> · <code>HTTP 200</code> · <code>image/jpeg</code></td></tr></tbody></table></div>
+<p>先取正文的父目录，再解析相对图片路径，随后剥离存储根，将每个路径分量按 URL 规则编码并用 <code>/</code> 连接。这样中文和空格可正常访问，已编码的字符也不会被重复编码。图片的查询参数与片段随地址保留。</p>
+<div class="scroll"><table><thead><tr><th>正文写法</th><th>候选行为</th></tr></thead><tbody><tr><td>Markdown 行内图片</td><td>支持相对路径、根相对路径、尖括号目标、标题，以及现有后台兼容的简单单行裸空格文件名。以文章目录解析相对路径，以资产根解析以 <code>/</code> 开头的路径。</td></tr><tr><td>引用式图片</td><td>将用到本地路径的图片引用展开为行内图片。普通链接即使共用同一引用定义，也保留原定义及效果。</td></tr><tr><td>HTML 图片</td><td>处理 Markdown 中实际 HTML 标签的 <code>&lt;img src&gt;</code>，修改本地 <code>src</code> 时保留同标签的其他属性。HTML 改写限于 <code>img[src]</code>，其他图片机制如 <code>srcset</code>、<code>picture/source</code> 和 CSS 背景不在此次改写范围内。当前两份有图的正文均使用 Markdown 图片语法。</td></tr><tr><td>已可访问的外部图片</td><td>完整的 HTTP(S) 或协议相对地址按原文保留。服务端处理正文时不下载外部图片。</td></tr><tr><td>普通链接和示例代码</td><td>解析 Markdown 的语法位置，保留普通超链接、行内代码、代码块、换行和原有排版。</td></tr><tr><td>无效和缺失路径</td><td>拒绝越出存储根、经符号链接指向根外、隐藏路径和指向 Markdown 文件的本地图片目标。合法路径的图片尚未落盘时仍生成目标 URL，读者可继续看正文，图片请求由 Nginx 返回 404。</td></tr></tbody></table></div>
+<p>前端拿到的是 Markdown。后端解析器只定位并替换图片目标。阅读页继续使用 DOMPurify 清洗最终渲染的 HTML。</p></section>
+<section id="flow"><h2>文章数据、可见性与错误语义</h2>
+
+<ol>
+<li>控制器复用现有 <code>ShowReq</code>。绑定和验证通过后，将 <code>c.Request.Context()</code> 与目录 ID 传给业务层。</li>
+<li>DAO 开启只读 <code>REPEATABLE READ</code> 事务，按 <code>article.catalogue_id = catalogue.id</code> 联表查找文件和它所属的书，要求书与文件均公开。使用唯一索引 <code>uk_catalogue_id</code> 取得文章行，包括文章自己的主键、存储路径和创建时间。</li>
+<li>在同一快照内读取这本书的目录行，两处接口共用按 <code>sort ASC</code> 的读取函数。业务层复用现有 <code>buildCatalogueTree</code>，只有请求 ID 对应公开树中的 <code>file</code> 才打开正文。因此直接手填 ID 也要通过相同的祖先显隐及 <code>img</code> 文件夹过滤规则。这一版每次读取的目录数据量与本书节点数成正比。</li>
+<li>数据库事务结束后才访问磁盘。读取器使用 <code>os.Root</code>，校验扩展名、文件类型、根边界和 UTF-8 编码，重写图片后返回正文。响应只暴露 <code>id</code>、<code>content</code>、<code>createdAt</code>。</li>
+</ol>
+<div class="scroll"><table><thead><tr><th>场景</th><th>业务码</th><th>对外表现</th></tr></thead><tbody><tr><td>授权成功，Markdown 可读取</td><td>200</td><td>返回文章。合法空正文用空字符串表示。</td></tr><tr><td>请求缺字段、ID 为裸数字、零、负数或超出 int64 上限</td><td>10101</td><td>沿用现有参数错误及空 data。</td></tr><tr><td>条目或文章缺失、节点为目录、书或祖先隐藏、节点在 img 资源分支内</td><td>20401</td><td>统一返回“文章不存在或暂不可读”。公开响应不会区分这些情况。</td></tr><tr><td>源文件不存在、不是允许的 Markdown 文件、UTF-8 无效或图片目标不符合读取规则</td><td>20401</td><td>同一不可读响应。缺少单张合法图片按上一节单独处理。</td></tr><tr><td>数据库连接、查询与事务出错</td><td>10201</td><td>现有数据库错误响应。</td></tr><tr><td>目录结构损坏、存储根未挂载、意外 I/O 或内部错误</td><td>500</td><td>现有内部错误响应。</td></tr></tbody></table></div>
+<p>HTTP 状态沿用项目约定，均为 <code>200</code>。失败响应的 <code>data</code> 为 <code>{}</code>。<code>20401</code> 沿用后台文章不可预览的码值，在公开接口中合并各类不可读原因。</p>
+<p><a href="../../biz/catalogue.go">现有公开树规则</a> · <a href="../../../SolarNotesAdminAPI/model/article.go">后台文章映射</a> · <a href="../../../SolarNotesAdminAPI/biz/article.go">后台正文读取</a> · <a href="../../../SolarNotesAdminAPI/resp_body/resp_body.go">后台响应码</a></p></section>
+<section id="code"><h2>拟实施的代码</h2>
+<p>每个文件可单独展开。完整文件用于新增或替换，差异用于现有 DAO 和路由入口。候选代码沿用项目当前的 Go 1.25。Markdown 源码定位复用后台的 Goldmark 版本，HTML 图片属性使用项目已有版本的 HTML tokenizer。</p>
+<pre><code class="language-bash">go mod edit -require=github.com/yuin/goldmark@v1.7.16
+go mod tidy</code></pre>
+<p><code>github.com/yuin/goldmark v1.7.16</code> 为新增直接依赖，<code>golang.org/x/net v0.51.0</code> 因直接使用 <code>html</code> 包成为直接依赖。随实施提交 <code>go.mod</code>、<code>go.sum</code>。</p>
+<details id="handler" class="file" open><summary><code>controller/v1/article/article.go</code></summary><p>替换固定正文。沿用既有入参和响应封装，输出文章行的主键和日期。</p><pre><code class="language-go" data-path="controller/v1/article/article.go"><span class="hljs-keyword">package</span> article
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;errors&quot;</span>
+	<span class="hljs-string">&quot;net/http&quot;</span>
+	<span class="hljs-string">&quot;strconv&quot;</span>
+	<span class="hljs-string">&quot;time&quot;</span>
+
+	<span class="hljs-string">&quot;SolarNotesAPI/biz&quot;</span>
+	reqArticle <span class="hljs-string">&quot;SolarNotesAPI/param/req/v1/article&quot;</span>
+	respArticle <span class="hljs-string">&quot;SolarNotesAPI/param/resp/v1/article&quot;</span>
+	<span class="hljs-string">&quot;SolarNotesAPI/resp_body&quot;</span>
+	<span class="hljs-string">&quot;SolarNotesAPI/sys_error&quot;</span>
+
+	<span class="hljs-string">&quot;github.com/gin-gonic/gin&quot;</span>
+)
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">Show</span><span class="hljs-params">(readMarkdown <span class="hljs-keyword">func</span>(<span class="hljs-type">string</span>)</span></span> (<span class="hljs-type">string</span>, <span class="hljs-type">error</span>)) gin.HandlerFunc {
+	<span class="hljs-keyword">return</span> <span class="hljs-function"><span class="hljs-keyword">func</span><span class="hljs-params">(c *gin.Context)</span></span> {
+		<span class="hljs-keyword">var</span> req reqArticle.ShowReq
+		<span class="hljs-keyword">var</span> body resp_body.RespBody
+		<span class="hljs-keyword">if</span> err := c.ShouldBindJSON(&amp;req); err != <span class="hljs-literal">nil</span> {
+			body.ValidateFailed(err)
+			c.JSON(http.StatusOK, body)
+			<span class="hljs-keyword">return</span>
+		}
+		a, err := biz.ReadArticle(c.Request.Context(), req.Catalogue.ID, readMarkdown)
+		<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+			<span class="hljs-keyword">var</span> dbErr *sys_error.DatabaseError
+			<span class="hljs-keyword">switch</span> {
+			<span class="hljs-keyword">case</span> errors.Is(err, sys_error.ArticleUnavailableErr):
+				body.ArticleUnavailableError()
+			<span class="hljs-keyword">case</span> errors.As(err, &amp;dbErr):
+				body.DBError()
+			<span class="hljs-keyword">default</span>:
+				body.InternalError()
+			}
+			c.JSON(http.StatusOK, body)
+			<span class="hljs-keyword">return</span>
+		}
+		body.Success(<span class="hljs-keyword">map</span>[<span class="hljs-type">string</span>]any{<span class="hljs-string">&quot;article&quot;</span>: respArticle.ShowResp{
+			ID:        strconv.FormatInt(a.ID, <span class="hljs-number">10</span>),
+			Content:   a.Content,
+			CreatedAt: a.CreatedAt.Format(time.DateOnly),
+		}})
+		c.JSON(http.StatusOK, body)
+	}
+}
+</code></pre></details>
+<details id="dto" class="file"><summary><code>param/resp/v1/article/show.go</code></summary><p>文章响应的三个公开字段。</p><pre><code class="language-go" data-path="param/resp/v1/article/show.go"><span class="hljs-keyword">package</span> article
+
+<span class="hljs-comment">// ShowResp contains the public fields of one article.</span>
+<span class="hljs-keyword">type</span> ShowResp <span class="hljs-keyword">struct</span> {
+	ID        <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;id&quot;`</span>
+	Content   <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;content&quot;`</span>
+	CreatedAt <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;createdAt&quot;`</span>
+}
+</code></pre></details>
+<details id="dao" class="file"><summary><code>model/article.go</code></summary><p>新增文章 DAO，在同一快照中读取文章元数据与目录行。</p><pre><code class="language-go" data-path="model/article.go"><span class="hljs-keyword">package</span> model
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;context&quot;</span>
+	<span class="hljs-string">&quot;database/sql&quot;</span>
+	<span class="hljs-string">&quot;errors&quot;</span>
+	<span class="hljs-string">&quot;time&quot;</span>
+
+	<span class="hljs-string">&quot;SolarNotesAPI/db&quot;</span>
+
+	<span class="hljs-string">&quot;gorm.io/gorm&quot;</span>
+)
+
+<span class="hljs-keyword">var</span> ArticleNotFoundErr = errors.New(<span class="hljs-string">&quot;article not found&quot;</span>)
+
+<span class="hljs-comment">// Article holds the article metadata and its catalogue node&#x27;s owning book ID.</span>
+<span class="hljs-keyword">type</span> Article <span class="hljs-keyword">struct</span> {
+	ID        <span class="hljs-type">int64</span>     <span class="hljs-string">`gorm:&quot;column:id&quot;`</span>
+	BookID    <span class="hljs-type">int64</span>     <span class="hljs-string">`gorm:&quot;column:book_id&quot;`</span>
+	Path      <span class="hljs-type">string</span>    <span class="hljs-string">`gorm:&quot;column:path&quot;`</span>
+	CreatedAt time.Time <span class="hljs-string">`gorm:&quot;column:created_at&quot;`</span>
+}
+
+<span class="hljs-comment">// ReadArticleSnapshot reads metadata and the book&#x27;s tree in a single snapshot.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">ReadArticleSnapshot</span><span class="hljs-params">(ctx context.Context, catalogueID <span class="hljs-type">int64</span>)</span></span> (Article, []Catalogue, <span class="hljs-type">error</span>) {
+	<span class="hljs-keyword">if</span> db.DB == <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> Article{}, <span class="hljs-literal">nil</span>, errors.New(<span class="hljs-string">&quot;database connection is not initialized&quot;</span>)
+	}
+	<span class="hljs-keyword">var</span> row Article
+	<span class="hljs-keyword">var</span> nodes []Catalogue
+	opts := &amp;sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: <span class="hljs-literal">true</span>}
+	err := db.DB.WithContext(ctx).Transaction(<span class="hljs-function"><span class="hljs-keyword">func</span><span class="hljs-params">(tx *gorm.DB)</span></span> <span class="hljs-type">error</span> {
+		err := tx.Table(<span class="hljs-string">&quot;article&quot;</span>).
+			Select(<span class="hljs-string">&quot;article.id, article.path, article.created_at, catalogue.book_id&quot;</span>).
+			Joins(<span class="hljs-string">&quot;JOIN catalogue ON catalogue.id = article.catalogue_id&quot;</span>).
+			Joins(<span class="hljs-string">&quot;JOIN book ON book.id = catalogue.book_id&quot;</span>).
+			Where(<span class="hljs-string">&quot;catalogue.id = ? AND catalogue.type = ? AND catalogue.display_status = ? AND book.display_status = ?&quot;</span>,
+				catalogueID, <span class="hljs-string">&quot;file&quot;</span>, <span class="hljs-string">&quot;visible&quot;</span>, <span class="hljs-string">&quot;visible&quot;</span>).
+			Take(&amp;row).Error
+		<span class="hljs-keyword">if</span> errors.Is(err, gorm.ErrRecordNotFound) {
+			<span class="hljs-keyword">return</span> ArticleNotFoundErr
+		}
+		<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+			<span class="hljs-keyword">return</span> err
+		}
+		nodes, err = readCatalogueRows(tx, row.BookID)
+		<span class="hljs-keyword">return</span> err
+	}, opts)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> Article{}, <span class="hljs-literal">nil</span>, err
+	}
+	<span class="hljs-keyword">return</span> row, nodes, <span class="hljs-literal">nil</span>
+}
+</code></pre></details>
+<details id="catalogue-dao" class="file"><summary><code>model/catalogue.go</code></summary><p>从现有目录 DAO 提取可复用的事务内查询，保留目录接口的调用方式。</p><pre><code class="language-diff" data-path="model/catalogue.go"><span class="hljs-comment">diff --git a/model/catalogue.go b/model/catalogue.go</span>
+<span class="hljs-comment">--- a/model/catalogue.go</span>
+<span class="hljs-comment">+++ b/model/catalogue.go</span>
+<span class="hljs-meta">@@ -43,13 +43,21 @@</span>
+ 			return err
+ 		}
+ 
+<span class="hljs-deletion">-		return tx.Select(&quot;id&quot;, &quot;book_id&quot;, &quot;parent_id&quot;, &quot;type&quot;, &quot;name&quot;, &quot;intro&quot;, &quot;sort&quot;, &quot;display_status&quot;, &quot;created_at&quot;).</span>
+<span class="hljs-deletion">-			Where(&quot;book_id = ?&quot;, bookID).</span>
+<span class="hljs-deletion">-			Order(&quot;sort ASC&quot;).</span>
+<span class="hljs-deletion">-			Find(&amp;rows).Error</span>
+<span class="hljs-addition">+		rows, err = readCatalogueRows(tx, bookID)</span>
+<span class="hljs-addition">+		return err</span>
+ 	}, opts)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	return rows, nil
+ }
+<span class="hljs-addition">+</span>
+<span class="hljs-addition">+// readCatalogueRows uses the caller&#x27;s transaction and the tree builder&#x27;s ordering.</span>
+<span class="hljs-addition">+func readCatalogueRows(tx *gorm.DB, bookID int64) ([]Catalogue, error) {</span>
+<span class="hljs-addition">+	var rows []Catalogue</span>
+<span class="hljs-addition">+	err := tx.Select(&quot;id&quot;, &quot;book_id&quot;, &quot;parent_id&quot;, &quot;type&quot;, &quot;name&quot;, &quot;intro&quot;, &quot;sort&quot;, &quot;display_status&quot;, &quot;created_at&quot;).</span>
+<span class="hljs-addition">+		Where(&quot;book_id = ?&quot;, bookID).</span>
+<span class="hljs-addition">+		Order(&quot;sort ASC&quot;).</span>
+<span class="hljs-addition">+		Find(&amp;rows).Error</span>
+<span class="hljs-addition">+	return rows, err</span>
+<span class="hljs-addition">+}</span>
+</code></pre></details>
+<details id="business" class="file"><summary><code>biz/article.go</code></summary><p>检验完整的公开路径。只有确认是可读叶节点，才调用文件读取器。</p><pre><code class="language-go" data-path="biz/article.go"><span class="hljs-keyword">package</span> biz
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;context&quot;</span>
+	<span class="hljs-string">&quot;errors&quot;</span>
+	<span class="hljs-string">&quot;time&quot;</span>
+
+	<span class="hljs-string">&quot;SolarNotesAPI/articlecontent&quot;</span>
+	<span class="hljs-string">&quot;SolarNotesAPI/model&quot;</span>
+	<span class="hljs-string">&quot;SolarNotesAPI/sys_error&quot;</span>
+)
+
+<span class="hljs-keyword">type</span> Article <span class="hljs-keyword">struct</span> {
+	ID        <span class="hljs-type">int64</span>
+	Content   <span class="hljs-type">string</span>
+	CreatedAt time.Time
+}
+
+<span class="hljs-comment">// ReadArticle accesses storage only after the requested file is found in the public tree.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">ReadArticle</span><span class="hljs-params">(ctx context.Context, catalogueID <span class="hljs-type">int64</span>, readMarkdown <span class="hljs-keyword">func</span>(<span class="hljs-type">string</span>)</span></span> (<span class="hljs-type">string</span>, <span class="hljs-type">error</span>)) (*Article, <span class="hljs-type">error</span>) {
+	<span class="hljs-keyword">if</span> ctx == <span class="hljs-literal">nil</span> || catalogueID &lt;= <span class="hljs-number">0</span> || readMarkdown == <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, &amp;sys_error.InternalError{Cause: errors.New(<span class="hljs-string">&quot;invalid article read arguments&quot;</span>)}
+	}
+	row, nodes, err := model.ReadArticleSnapshot(ctx, catalogueID)
+	<span class="hljs-keyword">if</span> errors.Is(err, model.ArticleNotFoundErr) {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, sys_error.ArticleUnavailableErr
+	}
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, &amp;sys_error.DatabaseError{Cause: err}
+	}
+	root, err := buildCatalogueTree(row.BookID, nodes)
+	<span class="hljs-keyword">if</span> errors.Is(err, sys_error.CatalogueNotFoundErr) {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, sys_error.ArticleUnavailableErr
+	}
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, &amp;sys_error.InternalError{Cause: err}
+	}
+	<span class="hljs-keyword">if</span> !containsPublicFile(root, catalogueID) || row.Path == <span class="hljs-string">&quot;&quot;</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, sys_error.ArticleUnavailableErr
+	}
+	<span class="hljs-keyword">if</span> row.ID &lt;= <span class="hljs-number">0</span> || row.CreatedAt.IsZero() {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, &amp;sys_error.InternalError{Cause: errors.New(<span class="hljs-string">&quot;invalid article metadata&quot;</span>)}
+	}
+	content, err := readMarkdown(row.Path)
+	<span class="hljs-keyword">if</span> errors.Is(err, articlecontent.ErrUnavailable) {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, sys_error.ArticleUnavailableErr
+	}
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, &amp;sys_error.InternalError{Cause: err}
+	}
+	<span class="hljs-keyword">return</span> &amp;Article{ID: row.ID, Content: content, CreatedAt: row.CreatedAt}, <span class="hljs-literal">nil</span>
+}
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">containsPublicFile</span><span class="hljs-params">(root *CatalogueNode, id <span class="hljs-type">int64</span>)</span></span> <span class="hljs-type">bool</span> {
+	stack := []*CatalogueNode{root}
+	<span class="hljs-keyword">for</span> <span class="hljs-built_in">len</span>(stack) &gt; <span class="hljs-number">0</span> {
+		last := <span class="hljs-built_in">len</span>(stack) - <span class="hljs-number">1</span>
+		node := stack[last]
+		stack = stack[:last]
+		<span class="hljs-keyword">if</span> node.ID == id {
+			<span class="hljs-keyword">return</span> node.Type == <span class="hljs-string">&quot;file&quot;</span>
+		}
+		stack = <span class="hljs-built_in">append</span>(stack, node.Children...)
+	}
+	<span class="hljs-keyword">return</span> <span class="hljs-literal">false</span>
+}
+</code></pre></details>
+<details id="read" class="file"><summary><code>articlecontent/reader.go</code></summary><p>打开正文、验证根边界、处理文件不可用，并将图片相对路径映射到公开基址。</p><pre><code class="language-go" data-path="articlecontent/reader.go"><span class="hljs-keyword">package</span> articlecontent
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;errors&quot;</span>
+	<span class="hljs-string">&quot;fmt&quot;</span>
+	<span class="hljs-string">&quot;io&quot;</span>
+	<span class="hljs-string">&quot;io/fs&quot;</span>
+	<span class="hljs-string">&quot;net/url&quot;</span>
+	<span class="hljs-string">&quot;os&quot;</span>
+	<span class="hljs-string">&quot;path/filepath&quot;</span>
+	<span class="hljs-string">&quot;strings&quot;</span>
+	<span class="hljs-string">&quot;syscall&quot;</span>
+	<span class="hljs-string">&quot;unicode/utf8&quot;</span>
+)
+
+<span class="hljs-comment">// ErrUnavailable identifies unavailable Markdown files and invalid local image references.</span>
+<span class="hljs-keyword">var</span> ErrUnavailable = errors.New(<span class="hljs-string">&quot;article content unavailable&quot;</span>)
+
+<span class="hljs-comment">// Reader shares immutable settings across requests.</span>
+<span class="hljs-keyword">type</span> Reader <span class="hljs-keyword">struct</span> {
+	rootDir <span class="hljs-type">string</span>
+	base    *url.URL
+}
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">New</span><span class="hljs-params">(rootDir, publicBaseURL <span class="hljs-type">string</span>)</span></span> (*Reader, <span class="hljs-type">error</span>) {
+	<span class="hljs-keyword">if</span> !filepath.IsAbs(rootDir) {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, errors.New(<span class="hljs-string">&quot;storage.root_dir must be absolute&quot;</span>)
+	}
+	base, err := url.Parse(publicBaseURL)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> || (base.Scheme != <span class="hljs-string">&quot;http&quot;</span> &amp;&amp; base.Scheme != <span class="hljs-string">&quot;https&quot;</span>) || base.Host == <span class="hljs-string">&quot;&quot;</span> ||
+		base.User != <span class="hljs-literal">nil</span> || base.RawQuery != <span class="hljs-string">&quot;&quot;</span> || base.ForceQuery || base.Fragment != <span class="hljs-string">&quot;&quot;</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, errors.New(<span class="hljs-string">&quot;asset.base_url must be an absolute HTTP(S) resource base&quot;</span>)
+	}
+	<span class="hljs-keyword">return</span> &amp;Reader{rootDir: filepath.Clean(rootDir), base: base}, <span class="hljs-literal">nil</span>
+}
+
+<span class="hljs-keyword">type</span> articleSource <span class="hljs-keyword">struct</span> {
+	root       *os.Root
+	assetBase  *url.URL
+	articleDir <span class="hljs-type">string</span>
+}
+
+<span class="hljs-comment">// ReadMarkdown opens a fresh storage root for this request and keeps the original Markdown layout.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(r *Reader)</span></span> ReadMarkdown(storedPath <span class="hljs-type">string</span>) (<span class="hljs-type">string</span>, <span class="hljs-type">error</span>) {
+	realRoot, err := filepath.EvalSymlinks(r.rootDir)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, err
+	}
+	root, err := os.OpenRoot(realRoot)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, err
+	}
+	<span class="hljs-keyword">defer</span> root.Close()
+
+	source := articleSource{root: root, assetBase: r.base}
+	data, err := source.readMarkdown(r.rootDir, storedPath)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, err
+	}
+	<span class="hljs-keyword">return</span> RewriteImages(data, source.imageURL)
+}
+
+<span class="hljs-comment">// readMarkdown 读取 UTF-8 正文, 成功时记下文章所在目录相对于存储根的真实路径.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(a *articleSource)</span></span> readMarkdown(rootDir, storedPath <span class="hljs-type">string</span>) ([]<span class="hljs-type">byte</span>, <span class="hljs-type">error</span>) {
+	name := storedPath
+	<span class="hljs-keyword">if</span> filepath.IsAbs(name) {
+		relative, err := filepath.Rel(rootDir, name)
+		<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+			<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, ErrUnavailable
+		}
+		name = relative
+	}
+	<span class="hljs-keyword">if</span> !strings.EqualFold(filepath.Ext(name), <span class="hljs-string">&quot;.md&quot;</span>) {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, ErrUnavailable
+	}
+	actual, err := a.resolveStoragePath(name, <span class="hljs-literal">false</span>)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, err
+	}
+	<span class="hljs-keyword">if</span> !strings.EqualFold(filepath.Ext(actual), <span class="hljs-string">&quot;.md&quot;</span>) {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, ErrUnavailable
+	}
+	<span class="hljs-comment">// Linux 和 macOS 上用 O_NONBLOCK 打开, 避免在 Stat 识别 FIFO 之前阻塞.</span>
+	f, err := a.root.OpenFile(actual, os.O_RDONLY|syscall.O_NONBLOCK, <span class="hljs-number">0</span>)
+	<span class="hljs-keyword">if</span> errors.Is(err, fs.ErrNotExist) {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, ErrUnavailable
+	}
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, err
+	}
+	<span class="hljs-keyword">defer</span> f.Close()
+	info, err := f.Stat()
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, err
+	}
+	<span class="hljs-keyword">if</span> !info.Mode().IsRegular() {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, ErrUnavailable
+	}
+	content, err := io.ReadAll(f)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, err
+	}
+	<span class="hljs-keyword">if</span> !utf8.Valid(content) {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, ErrUnavailable
+	}
+	a.articleDir = filepath.Dir(actual)
+	<span class="hljs-keyword">return</span> content, <span class="hljs-literal">nil</span>
+}
+
+<span class="hljs-comment">// resolveStoragePath 解析符号链接并检查根边界. 普通缺图可以保留尚不存在的尾部路径.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(a *articleSource)</span></span> resolveStoragePath(name <span class="hljs-type">string</span>, allowMissing <span class="hljs-type">bool</span>) (<span class="hljs-type">string</span>, <span class="hljs-type">error</span>) {
+	<span class="hljs-keyword">if</span> !filepath.IsLocal(name) || strings.ContainsRune(name, <span class="hljs-number">0</span>) {
+		<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, ErrUnavailable
+	}
+	rootDir := a.root.Name()
+	candidate := filepath.Join(rootDir, name)
+	<span class="hljs-keyword">var</span> missing []<span class="hljs-type">string</span>
+	<span class="hljs-keyword">for</span> {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		<span class="hljs-keyword">if</span> err == <span class="hljs-literal">nil</span> {
+			relative, relErr := filepath.Rel(rootDir, resolved)
+			<span class="hljs-keyword">if</span> relErr != <span class="hljs-literal">nil</span> || !filepath.IsLocal(relative) {
+				<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, ErrUnavailable
+			}
+			<span class="hljs-keyword">for</span> i := <span class="hljs-built_in">len</span>(missing) - <span class="hljs-number">1</span>; i &gt;= <span class="hljs-number">0</span>; i-- {
+				relative = filepath.Join(relative, missing[i])
+			}
+			<span class="hljs-keyword">return</span> relative, <span class="hljs-literal">nil</span>
+		}
+		<span class="hljs-keyword">if</span> errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ELOOP) {
+			<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, ErrUnavailable
+		}
+		<span class="hljs-keyword">if</span> !errors.Is(err, fs.ErrNotExist) || candidate == rootDir {
+			<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, err
+		}
+		<span class="hljs-keyword">if</span> !allowMissing {
+			<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, ErrUnavailable
+		}
+		<span class="hljs-comment">// 失效的符号链接本身仍有目录项, 普通缺失路径则没有.</span>
+		_, statErr := os.Lstat(candidate)
+		<span class="hljs-keyword">if</span> statErr == <span class="hljs-literal">nil</span> {
+			<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, ErrUnavailable
+		}
+		<span class="hljs-keyword">if</span> !errors.Is(statErr, fs.ErrNotExist) {
+			<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, statErr
+		}
+		missing = <span class="hljs-built_in">append</span>(missing, filepath.Base(candidate))
+		candidate = filepath.Dir(candidate)
+	}
+}
+
+<span class="hljs-comment">// imageURL 将文章引用的本地图片映射到该文件的公开 URL.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(a *articleSource)</span></span> imageURL(destination <span class="hljs-type">string</span>) (<span class="hljs-type">string</span>, <span class="hljs-type">error</span>) {
+	u, err := url.Parse(destination)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, fmt.Errorf(<span class="hljs-string">&quot;%w: invalid image URI&quot;</span>, ErrUnavailable)
+	}
+	<span class="hljs-keyword">if</span> u.Host != <span class="hljs-string">&quot;&quot;</span> &amp;&amp; (u.Scheme == <span class="hljs-string">&quot;http&quot;</span> || u.Scheme == <span class="hljs-string">&quot;https&quot;</span> || u.Scheme == <span class="hljs-string">&quot;&quot;</span>) {
+		<span class="hljs-keyword">return</span> destination, <span class="hljs-literal">nil</span>
+	}
+	<span class="hljs-keyword">if</span> u.Scheme != <span class="hljs-string">&quot;&quot;</span> || u.Path == <span class="hljs-string">&quot;&quot;</span> || strings.Contains(u.Path, <span class="hljs-string">&quot;\\&quot;</span>) {
+		<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, ErrUnavailable
+	}
+	name := filepath.FromSlash(u.Path)
+	<span class="hljs-keyword">if</span> strings.HasPrefix(u.Path, <span class="hljs-string">&quot;/&quot;</span>) {
+		name = strings.TrimPrefix(name, <span class="hljs-type">string</span>(filepath.Separator))
+	} <span class="hljs-keyword">else</span> {
+		name = filepath.Join(a.articleDir, name)
+	}
+	<span class="hljs-keyword">if</span> !a.isPublicImagePath(filepath.Clean(name)) {
+		<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, ErrUnavailable
+	}
+	actual, err := a.resolveStoragePath(name, <span class="hljs-literal">true</span>)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, err
+	}
+	<span class="hljs-keyword">if</span> !a.isPublicImagePath(actual) {
+		<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, ErrUnavailable
+	}
+	path := filepath.ToSlash(actual)
+	segments := strings.Split(path, <span class="hljs-string">&quot;/&quot;</span>)
+	<span class="hljs-keyword">for</span> i, segment := <span class="hljs-keyword">range</span> segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	result := *a.assetBase
+	result.Path = strings.TrimRight(result.Path, <span class="hljs-string">&quot;/&quot;</span>) + <span class="hljs-string">&quot;/&quot;</span> + path
+	result.RawPath = strings.TrimRight(a.assetBase.EscapedPath(), <span class="hljs-string">&quot;/&quot;</span>) + <span class="hljs-string">&quot;/&quot;</span> + strings.Join(segments, <span class="hljs-string">&quot;/&quot;</span>)
+	result.RawQuery, result.ForceQuery = u.RawQuery, u.ForceQuery
+	result.Fragment, result.RawFragment = u.Fragment, u.RawFragment
+	<span class="hljs-keyword">return</span> result.String(), <span class="hljs-literal">nil</span>
+}
+
+<span class="hljs-comment">// isPublicImagePath 检查 Nginx 对隐藏路径分量和 .md 的限制.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(a *articleSource)</span></span> isPublicImagePath(name <span class="hljs-type">string</span>) <span class="hljs-type">bool</span> {
+	<span class="hljs-keyword">if</span> !filepath.IsLocal(name) || strings.EqualFold(filepath.Ext(name), <span class="hljs-string">&quot;.md&quot;</span>) {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">false</span>
+	}
+	<span class="hljs-keyword">for</span> _, segment := <span class="hljs-keyword">range</span> strings.Split(filepath.ToSlash(name), <span class="hljs-string">&quot;/&quot;</span>) {
+		<span class="hljs-keyword">if</span> strings.HasPrefix(segment, <span class="hljs-string">&quot;.&quot;</span>) {
+			<span class="hljs-keyword">return</span> <span class="hljs-literal">false</span>
+		}
+	}
+	<span class="hljs-keyword">return</span> <span class="hljs-literal">true</span>
+}
+</code></pre></details>
+<details id="markdown" class="file"><summary><code>articlecontent/markdown.go</code></summary><p>基于后台的 Goldmark 解析器，以源文件的字节位置编辑目标，保留其余 Markdown。</p><pre><code class="language-go" data-path="articlecontent/markdown.go"><span class="hljs-keyword">package</span> articlecontent
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;bytes&quot;</span>
+	<span class="hljs-string">&quot;errors&quot;</span>
+	<span class="hljs-string">&quot;html&quot;</span>
+	<span class="hljs-string">&quot;regexp&quot;</span>
+	<span class="hljs-string">&quot;sort&quot;</span>
+	<span class="hljs-string">&quot;strings&quot;</span>
+
+	<span class="hljs-string">&quot;github.com/yuin/goldmark/ast&quot;</span>
+	<span class="hljs-string">&quot;github.com/yuin/goldmark/parser&quot;</span>
+	<span class="hljs-string">&quot;github.com/yuin/goldmark/text&quot;</span>
+	<span class="hljs-string">&quot;github.com/yuin/goldmark/util&quot;</span>
+)
+
+<span class="hljs-comment">// imageEdit 记录一次针对源码字节区间的替换.</span>
+<span class="hljs-keyword">type</span> imageEdit <span class="hljs-keyword">struct</span> {
+	start, end <span class="hljs-type">int</span>    <span class="hljs-comment">// start 和 end 标记左闭右开的字节范围.</span>
+	value      <span class="hljs-type">string</span> <span class="hljs-comment">// value 是新写入的 Markdown 片段.</span>
+}
+
+<span class="hljs-comment">// imageParser 记录 Goldmark 解析图片时消费的源码位置. 每篇文章创建一个实例.</span>
+<span class="hljs-keyword">type</span> imageParser <span class="hljs-keyword">struct</span> {
+	parser.InlineParser                              <span class="hljs-comment">// InlineParser 委托给 Goldmark 的标准链接解析器.</span>
+	resolve             <span class="hljs-function"><span class="hljs-keyword">func</span><span class="hljs-params">(<span class="hljs-type">string</span>)</span></span> (<span class="hljs-type">string</span>, <span class="hljs-type">error</span>) <span class="hljs-comment">// resolve 将单个目标转换为公开 URL.</span>
+	edits               []imageEdit                  <span class="hljs-comment">// edits 只收集需要改写的图片.</span>
+	err                 <span class="hljs-type">error</span>                        <span class="hljs-comment">// err 保留第一次解析或映射失败的原因.</span>
+}
+
+<span class="hljs-comment">// RewriteImages 重写图片目标, 并按原字节顺序拼回其余正文.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">RewriteImages</span><span class="hljs-params">(source []<span class="hljs-type">byte</span>, resolve <span class="hljs-keyword">func</span>(<span class="hljs-type">string</span>)</span></span> (<span class="hljs-type">string</span>, <span class="hljs-type">error</span>)) (<span class="hljs-type">string</span>, <span class="hljs-type">error</span>) {
+	p := &amp;imageParser{InlineParser: parser.NewLinkParser(), resolve: resolve}
+	inlines := parser.DefaultInlineParsers()
+	<span class="hljs-keyword">for</span> i, entry := <span class="hljs-keyword">range</span> inlines {
+		<span class="hljs-keyword">if</span> entry.Value == p.InlineParser {
+			inlines[i].Value = p
+		}
+	}
+	markdown := parser.NewParser(
+		parser.WithBlockParsers(parser.DefaultBlockParsers()...),
+		parser.WithInlineParsers(inlines...),
+		parser.WithParagraphTransformers(parser.DefaultParagraphTransformers()...),
+	)
+	document := markdown.Parse(text.NewReader(source))
+	<span class="hljs-keyword">if</span> p.err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, p.err
+	}
+	<span class="hljs-keyword">if</span> err := p.rewriteHTML(document, source); err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, err
+	}
+	sort.Slice(p.edits, <span class="hljs-function"><span class="hljs-keyword">func</span><span class="hljs-params">(i, j <span class="hljs-type">int</span>)</span></span> <span class="hljs-type">bool</span> { <span class="hljs-keyword">return</span> p.edits[i].start &lt; p.edits[j].start })
+	<span class="hljs-keyword">var</span> out strings.Builder
+	cursor := <span class="hljs-number">0</span>
+	<span class="hljs-keyword">for</span> _, edit := <span class="hljs-keyword">range</span> p.edits {
+		<span class="hljs-keyword">if</span> edit.start &lt; cursor || edit.end &lt; edit.start || edit.end &gt; <span class="hljs-built_in">len</span>(source) {
+			<span class="hljs-keyword">return</span> <span class="hljs-string">&quot;&quot;</span>, errors.New(<span class="hljs-string">&quot;invalid Markdown image range&quot;</span>)
+		}
+		out.Write(source[cursor:edit.start])
+		out.WriteString(edit.value)
+		cursor = edit.end
+	}
+	out.Write(source[cursor:])
+	<span class="hljs-keyword">return</span> out.String(), <span class="hljs-literal">nil</span>
+}
+
+<span class="hljs-comment">// CloseBlock 转发标准解析器的收尾操作, 防止链接状态跨段落残留.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(p *imageParser)</span></span> CloseBlock(parent ast.Node, r text.Reader, ctx parser.Context) {
+	p.InlineParser.(parser.CloseBlocker).CloseBlock(parent, r, ctx)
+}
+
+<span class="hljs-comment">// legacyImage 兼容简单单行图片中带裸空格的文件名. 标准标题和尖括号写法交给 Goldmark.</span>
+<span class="hljs-keyword">var</span> legacyImage = regexp.MustCompile(<span class="hljs-string">`^!\[[^\[\]\\\x60\r\n]*\]\(([^()&lt;&gt;&quot;&#x27;\\\t\r\n ]+(?: +[^()&lt;&gt;&quot;&#x27;\\\t\r\n ]+)+)\)`</span>)
+
+<span class="hljs-comment">// Parse 在解析器处理行内语法时定位图片, 记录真正需要替换的区间.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(p *imageParser)</span></span> Parse(parent ast.Node, r text.Reader, ctx parser.Context) ast.Node {
+	line, start := r.PeekLine()
+	<span class="hljs-keyword">if</span> line[<span class="hljs-number">0</span>] == <span class="hljs-string">&#x27;!&#x27;</span> {
+		<span class="hljs-keyword">if</span> match := legacyImage.FindSubmatchIndex(line); match != <span class="hljs-literal">nil</span> {
+			p.replace(line[match[<span class="hljs-number">2</span>]:match[<span class="hljs-number">3</span>]], start.Start+match[<span class="hljs-number">2</span>], start.Start+match[<span class="hljs-number">3</span>], <span class="hljs-literal">nil</span>)
+			r.Advance(match[<span class="hljs-number">1</span>])
+			<span class="hljs-keyword">return</span> ast.NewString(line[:match[<span class="hljs-number">1</span>]])
+		}
+	}
+	lineNo, saved := r.Position()
+	node := p.InlineParser.Parse(parent, r, ctx)
+	img, ok := node.(*ast.Image)
+	<span class="hljs-keyword">if</span> !ok || <span class="hljs-built_in">len</span>(img.Destination) == <span class="hljs-number">0</span> {
+		<span class="hljs-keyword">return</span> node
+	}
+	endLine, end := r.Position()
+	afterLabel := start.Start + <span class="hljs-number">1</span>
+	<span class="hljs-keyword">if</span> <span class="hljs-built_in">len</span>(line) &gt; <span class="hljs-number">1</span> &amp;&amp; line[<span class="hljs-number">1</span>] == <span class="hljs-string">&#x27;(&#x27;</span> &amp;&amp; end.Start &gt; afterLabel {
+		<span class="hljs-comment">// 只定位目标, 保留括号, 标题及其间的排版.</span>
+		r.SetPosition(lineNo, saved)
+		r.Advance(<span class="hljs-number">2</span>)
+		r.SkipSpaces()
+		_, dest := r.Position()
+		from := dest.Start
+		<span class="hljs-keyword">if</span> r.Peek() == <span class="hljs-string">&#x27;&lt;&#x27;</span> {
+			from++
+		}
+		r.SetPosition(endLine, end)
+		to := from + <span class="hljs-built_in">len</span>(img.Destination)
+		<span class="hljs-keyword">if</span> from &lt; <span class="hljs-number">0</span> || to &gt; <span class="hljs-built_in">len</span>(r.Source()) || !bytes.Equal(r.Source()[from:to], img.Destination) {
+			p.err = errors.New(<span class="hljs-string">&quot;cannot locate Markdown image destination&quot;</span>)
+			<span class="hljs-keyword">return</span> node
+		}
+		p.replace(img.Destination, from, to, <span class="hljs-literal">nil</span>)
+	} <span class="hljs-keyword">else</span> {
+		<span class="hljs-comment">// 把这次图片引用展开为行内图片, 普通链接可以继续使用同一份引用定义.</span>
+		p.replace(img.Destination, afterLabel, end.Start, img)
+	}
+	<span class="hljs-keyword">return</span> node
+}
+
+<span class="hljs-comment">// markdownEscape 匹配单个反斜杠标点转义或带分号的字符实体.</span>
+<span class="hljs-keyword">var</span> markdownEscape = regexp.MustCompile(<span class="hljs-string">`\\[[:punct:]]|&amp;#(?:[0-9]{1,7}|[xX][0-9a-fA-F]{1,6});|&amp;[A-Za-z][A-Za-z0-9]*;`</span>)
+
+<span class="hljs-comment">// markdownValue 一次解开原文中的转义和实体, 保留 URL 百分号编码及转义后产生的字面文本.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">markdownValue</span><span class="hljs-params">(raw []<span class="hljs-type">byte</span>)</span></span> <span class="hljs-type">string</span> {
+	<span class="hljs-keyword">return</span> markdownEscape.ReplaceAllStringFunc(<span class="hljs-type">string</span>(raw), decodeMarkdownEscape)
+}
+
+<span class="hljs-comment">// decodeMarkdownEscape 保留未知的实体名称, 数字实体按十进制或显式十六进制解码.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">decodeMarkdownEscape</span><span class="hljs-params">(token <span class="hljs-type">string</span>)</span></span> <span class="hljs-type">string</span> {
+	<span class="hljs-keyword">if</span> token[<span class="hljs-number">0</span>] == <span class="hljs-string">&#x27;\\&#x27;</span> {
+		<span class="hljs-keyword">return</span> token[<span class="hljs-number">1</span>:]
+	}
+	<span class="hljs-keyword">if</span> token[<span class="hljs-number">1</span>] == <span class="hljs-string">&#x27;#&#x27;</span> {
+		<span class="hljs-keyword">return</span> html.UnescapeString(token)
+	}
+	<span class="hljs-keyword">if</span> entity, ok := util.LookUpHTML5EntityByName(token[<span class="hljs-number">1</span> : <span class="hljs-built_in">len</span>(token)<span class="hljs-number">-1</span>]); ok {
+		<span class="hljs-keyword">return</span> <span class="hljs-type">string</span>(entity.Characters)
+	}
+	<span class="hljs-keyword">return</span> token
+}
+
+<span class="hljs-comment">// urlSyntax 保护目标中的 Markdown 定界符和字符实体.</span>
+<span class="hljs-keyword">var</span> urlSyntax = strings.NewReplacer(<span class="hljs-string">&quot;(&quot;</span>, <span class="hljs-string">&quot;%28&quot;</span>, <span class="hljs-string">&quot;)&quot;</span>, <span class="hljs-string">&quot;%29&quot;</span>, <span class="hljs-string">&quot;&lt;&quot;</span>, <span class="hljs-string">&quot;%3C&quot;</span>, <span class="hljs-string">&quot;&gt;&quot;</span>, <span class="hljs-string">&quot;%3E&quot;</span>,
+	<span class="hljs-string">&quot; &quot;</span>, <span class="hljs-string">&quot;%20&quot;</span>, <span class="hljs-string">&quot;\\&quot;</span>, <span class="hljs-string">&quot;%5C&quot;</span>, <span class="hljs-string">&quot;\r&quot;</span>, <span class="hljs-string">&quot;%0D&quot;</span>, <span class="hljs-string">&quot;\n&quot;</span>, <span class="hljs-string">&quot;%0A&quot;</span>, <span class="hljs-string">&quot;&amp;&quot;</span>, <span class="hljs-string">&quot;&amp;amp;&quot;</span>)
+
+<span class="hljs-comment">// replace 仅在目标变化时记录替换, 外部 HTTP(S) 图片可完整保留原文.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(p *imageParser)</span></span> replace(raw []<span class="hljs-type">byte</span>, start, end <span class="hljs-type">int</span>, ref *ast.Image) {
+	<span class="hljs-keyword">if</span> p.err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span>
+	}
+	value := markdownValue(raw)
+	target, err := p.resolve(value)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		p.err = err
+		<span class="hljs-keyword">return</span>
+	}
+	<span class="hljs-keyword">if</span> target == value {
+		<span class="hljs-keyword">return</span>
+	}
+	target = urlSyntax.Replace(target)
+	<span class="hljs-keyword">if</span> ref != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">if</span> <span class="hljs-built_in">len</span>(ref.Title) &gt; <span class="hljs-number">0</span> {
+			title := html.EscapeString(markdownValue(ref.Title))
+			title = strings.NewReplacer(<span class="hljs-string">&quot;\\&quot;</span>, <span class="hljs-string">&quot;\\\\&quot;</span>, <span class="hljs-string">&quot;\r&quot;</span>, <span class="hljs-string">&quot;&amp;#13;&quot;</span>, <span class="hljs-string">&quot;\n&quot;</span>, <span class="hljs-string">&quot;&amp;#10;&quot;</span>).Replace(title)
+			target += <span class="hljs-string">` &quot;`</span> + title + <span class="hljs-string">`&quot;`</span>
+		}
+		target = <span class="hljs-string">&quot;(&quot;</span> + target + <span class="hljs-string">&quot;)&quot;</span>
+	}
+	p.edits = <span class="hljs-built_in">append</span>(p.edits, imageEdit{start: start, end: end, value: target})
+}
+</code></pre></details>
+<details id="html-img" class="file"><summary><code>articlecontent/html.go</code></summary><p>定位原生 HTML 图片的 src 属性。</p><pre><code class="language-go" data-path="articlecontent/html.go"><span class="hljs-keyword">package</span> articlecontent
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;bytes&quot;</span>
+	<span class="hljs-string">&quot;html&quot;</span>
+	<span class="hljs-string">&quot;io&quot;</span>
+	<span class="hljs-string">&quot;regexp&quot;</span>
+	<span class="hljs-string">&quot;strings&quot;</span>
+
+	<span class="hljs-string">&quot;github.com/yuin/goldmark/ast&quot;</span>
+	<span class="hljs-string">&quot;github.com/yuin/goldmark/text&quot;</span>
+	htmltoken <span class="hljs-string">&quot;golang.org/x/net/html&quot;</span>
+)
+
+<span class="hljs-comment">// Only raw HTML recognized by the Markdown parser can contain HTML image elements.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(p *imageParser)</span></span> rewriteHTML(document ast.Node, source []<span class="hljs-type">byte</span>) <span class="hljs-type">error</span> {
+	<span class="hljs-keyword">var</span> literalElement <span class="hljs-type">string</span>
+	<span class="hljs-keyword">return</span> ast.Walk(document, <span class="hljs-function"><span class="hljs-keyword">func</span><span class="hljs-params">(node ast.Node, entering <span class="hljs-type">bool</span>)</span></span> (ast.WalkStatus, <span class="hljs-type">error</span>) {
+		<span class="hljs-keyword">if</span> !entering {
+			<span class="hljs-keyword">return</span> ast.WalkContinue, <span class="hljs-literal">nil</span>
+		}
+		<span class="hljs-keyword">var</span> segments []text.Segment
+		<span class="hljs-keyword">switch</span> n := node.(<span class="hljs-keyword">type</span>) {
+		<span class="hljs-keyword">case</span> *ast.Image:
+			<span class="hljs-comment">// An image description becomes alt text rather than rendered HTML.</span>
+			<span class="hljs-keyword">return</span> ast.WalkSkipChildren, <span class="hljs-literal">nil</span>
+		<span class="hljs-keyword">case</span> *ast.RawHTML:
+			segments = n.Segments.Sliced(<span class="hljs-number">0</span>, n.Segments.Len())
+		<span class="hljs-keyword">case</span> *ast.HTMLBlock:
+			lines := n.Lines()
+			segments = lines.Sliced(<span class="hljs-number">0</span>, lines.Len())
+			<span class="hljs-keyword">if</span> n.HasClosure() {
+				segments = <span class="hljs-built_in">append</span>(<span class="hljs-built_in">append</span>([]text.Segment(<span class="hljs-literal">nil</span>), segments...), n.ClosureLine)
+			}
+		<span class="hljs-keyword">default</span>:
+			<span class="hljs-keyword">return</span> ast.WalkContinue, <span class="hljs-literal">nil</span>
+		}
+		<span class="hljs-keyword">return</span> ast.WalkContinue, p.rewriteHTMLFragment(segments, source, &amp;literalElement)
+	})
+}
+
+<span class="hljs-comment">// Tokenize a contiguous HTML fragment while retaining offsets into the Markdown source.</span>
+<span class="hljs-comment">// Offsets can jump between lines inside a block quote or a list item.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(p *imageParser)</span></span> rewriteHTMLFragment(segments []text.Segment, source []<span class="hljs-type">byte</span>, literalElement *<span class="hljs-type">string</span>) <span class="hljs-type">error</span> {
+	<span class="hljs-keyword">var</span> fragment []<span class="hljs-type">byte</span>
+	<span class="hljs-keyword">for</span> _, segment := <span class="hljs-keyword">range</span> segments {
+		fragment = <span class="hljs-built_in">append</span>(fragment, source[segment.Start:segment.Stop]...)
+	}
+	z := htmltoken.NewTokenizer(bytes.NewReader(fragment))
+	offset, span, spanStart := <span class="hljs-number">0</span>, <span class="hljs-number">0</span>, <span class="hljs-number">0</span>
+	<span class="hljs-keyword">for</span> {
+		kind := z.Next()
+		<span class="hljs-keyword">if</span> kind == htmltoken.ErrorToken {
+			<span class="hljs-keyword">if</span> z.Err() == io.EOF {
+				<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>
+			}
+			<span class="hljs-keyword">return</span> z.Err()
+		}
+		from := offset
+		offset += <span class="hljs-built_in">len</span>(z.Raw())
+		<span class="hljs-keyword">if</span> kind != htmltoken.StartTagToken &amp;&amp; kind != htmltoken.SelfClosingTagToken &amp;&amp; kind != htmltoken.EndTagToken {
+			<span class="hljs-keyword">continue</span>
+		}
+		token := z.Token()
+		<span class="hljs-keyword">if</span> *literalElement != <span class="hljs-string">&quot;&quot;</span> {
+			<span class="hljs-keyword">if</span> kind == htmltoken.EndTagToken &amp;&amp; token.Data == *literalElement {
+				*literalElement = <span class="hljs-string">&quot;&quot;</span>
+			}
+			<span class="hljs-keyword">continue</span>
+		}
+		<span class="hljs-keyword">if</span> kind == htmltoken.EndTagToken {
+			<span class="hljs-keyword">continue</span>
+		}
+		<span class="hljs-keyword">switch</span> token.Data {
+		<span class="hljs-keyword">case</span> <span class="hljs-string">&quot;pre&quot;</span>, <span class="hljs-string">&quot;code&quot;</span>, <span class="hljs-string">&quot;script&quot;</span>, <span class="hljs-string">&quot;style&quot;</span>, <span class="hljs-string">&quot;textarea&quot;</span>, <span class="hljs-string">&quot;title&quot;</span>:
+			*literalElement = token.Data
+			<span class="hljs-keyword">continue</span>
+		<span class="hljs-keyword">case</span> <span class="hljs-string">&quot;img&quot;</span>:
+		<span class="hljs-keyword">default</span>:
+			<span class="hljs-keyword">continue</span>
+		}
+		<span class="hljs-keyword">for</span> _, attr := <span class="hljs-keyword">range</span> token.Attr {
+			<span class="hljs-keyword">if</span> attr.Key != <span class="hljs-string">&quot;src&quot;</span> {
+				<span class="hljs-keyword">continue</span>
+			}
+			first, last := htmlImageSource(fragment[from:offset])
+			<span class="hljs-keyword">if</span> first &lt; <span class="hljs-number">0</span> || attr.Val == <span class="hljs-string">&quot;&quot;</span> {
+				<span class="hljs-keyword">break</span>
+			}
+			first, last = first+from, last+from
+			<span class="hljs-comment">// Keep the Markdown&#x27;s list and quote prefixes intact for multiline tags.</span>
+			<span class="hljs-keyword">for</span> span &lt; <span class="hljs-built_in">len</span>(segments) &amp;&amp; first &gt;= spanStart+segments[span].Stop-segments[span].Start {
+				spanStart += segments[span].Stop - segments[span].Start
+				span++
+			}
+			<span class="hljs-keyword">if</span> span == <span class="hljs-built_in">len</span>(segments) || last &gt; spanStart+segments[span].Stop-segments[span].Start {
+				<span class="hljs-keyword">break</span>
+			}
+			url, err := p.resolve(attr.Val)
+			<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+				<span class="hljs-keyword">return</span> err
+			}
+			<span class="hljs-keyword">if</span> url != attr.Val {
+				value := html.EscapeString(url)
+				<span class="hljs-keyword">if</span> previous := fragment[first<span class="hljs-number">-1</span>]; previous != <span class="hljs-string">&#x27;&quot;&#x27;</span> &amp;&amp; previous != <span class="hljs-string">&#x27;\&#x27;&#x27;</span> {
+					value = strings.NewReplacer(<span class="hljs-string">&quot;=&quot;</span>, <span class="hljs-string">&quot;&amp;#61;&quot;</span>, <span class="hljs-string">&quot;\x60&quot;</span>, <span class="hljs-string">&quot;&amp;#96;&quot;</span>).Replace(value)
+				}
+				origin := segments[span].Start - spanStart
+				p.edits = <span class="hljs-built_in">append</span>(p.edits, imageEdit{start: origin + first, end: origin + last, value: value})
+			}
+			<span class="hljs-keyword">break</span> <span class="hljs-comment">// HTML uses the first occurrence of a duplicate attribute.</span>
+		}
+	}
+}
+
+<span class="hljs-comment">// Consume attributes in order, so src-like text in another attribute is never edited.</span>
+<span class="hljs-keyword">var</span> rawHTMLAttr = regexp.MustCompile(<span class="hljs-string">`^[\t\n\f\r ]+([^\t\n\f\r /&gt;=]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:&quot;([^&quot;]*)&quot;|&#x27;([^&#x27;]*)&#x27;|([^\t\n\f\r &gt;]+)))?`</span>)
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">htmlImageSource</span><span class="hljs-params">(raw []<span class="hljs-type">byte</span>)</span></span> (<span class="hljs-type">int</span>, <span class="hljs-type">int</span>) {
+	<span class="hljs-keyword">for</span> offset := <span class="hljs-built_in">len</span>(<span class="hljs-string">&quot;&lt;img&quot;</span>); offset &lt; <span class="hljs-built_in">len</span>(raw); {
+		index := rawHTMLAttr.FindSubmatchIndex(raw[offset:])
+		<span class="hljs-keyword">if</span> index == <span class="hljs-literal">nil</span> {
+			<span class="hljs-keyword">break</span>
+		}
+		<span class="hljs-keyword">if</span> bytes.EqualFold(raw[offset+index[<span class="hljs-number">2</span>]:offset+index[<span class="hljs-number">3</span>]], []<span class="hljs-type">byte</span>(<span class="hljs-string">&quot;src&quot;</span>)) {
+			<span class="hljs-keyword">for</span> _, pair := <span class="hljs-keyword">range</span> []<span class="hljs-type">int</span>{<span class="hljs-number">4</span>, <span class="hljs-number">6</span>, <span class="hljs-number">8</span>} {
+				<span class="hljs-keyword">if</span> index[pair] != <span class="hljs-number">-1</span> {
+					<span class="hljs-keyword">return</span> offset + index[pair], offset + index[pair+<span class="hljs-number">1</span>]
+				}
+			}
+			<span class="hljs-keyword">break</span>
+		}
+		offset += index[<span class="hljs-number">1</span>]
+	}
+	<span class="hljs-keyword">return</span> <span class="hljs-number">-1</span>, <span class="hljs-number">-1</span>
+}
+</code></pre></details>
+<details id="errors" class="file"><summary><code>sys_error/article_error.go</code></summary><p>文章不可读的公开错误。</p><pre><code class="language-go" data-path="sys_error/article_error.go"><span class="hljs-keyword">package</span> sys_error
+
+<span class="hljs-keyword">import</span> <span class="hljs-string">&quot;errors&quot;</span>
+
+<span class="hljs-keyword">var</span> ArticleUnavailableErr = errors.New(<span class="hljs-string">&quot;文章不存在或暂不可读&quot;</span>)
+</code></pre></details>
+<details id="envelope" class="file"><summary><code>resp_body/article_error.go</code></summary><p>将不可读错误映射为公开业务码。</p><pre><code class="language-go" data-path="resp_body/article_error.go"><span class="hljs-keyword">package</span> resp_body
+
+<span class="hljs-keyword">import</span> <span class="hljs-string">&quot;SolarNotesAPI/sys_error&quot;</span>
+
+<span class="hljs-keyword">const</span> ArticleUnavailableCode = <span class="hljs-number">20401</span>
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(r *RespBody)</span></span> ArticleUnavailableError() {
+	r.failure(ArticleUnavailableCode, sys_error.ArticleUnavailableErr.Error())
+}
+</code></pre></details>
+<details id="wire" class="file"><summary><code>main.go</code></summary><p>创建与进程共享的只读配置对象，按现有 POST 路由注入正文读取方法。</p><pre><code class="language-diff" data-path="main.go"><span class="hljs-comment">diff --git a/main.go b/main.go</span>
+<span class="hljs-comment">--- a/main.go</span>
+<span class="hljs-comment">+++ b/main.go</span>
+<span class="hljs-meta">@@ -3,6 +3,7 @@</span>
+ import (
+ 	&quot;log&quot;
+ 
+<span class="hljs-addition">+	&quot;SolarNotesAPI/articlecontent&quot;</span>
+ 	&quot;SolarNotesAPI/conf&quot;
+ 	&quot;SolarNotesAPI/controller/v1/article&quot;
+ 	&quot;SolarNotesAPI/controller/v1/book&quot;
+<span class="hljs-meta">@@ -22,6 +23,10 @@</span>
+ 
+ func run() error {
+ 	cfg, err := conf.Load()
+<span class="hljs-addition">+	if err != nil {</span>
+<span class="hljs-addition">+		return err</span>
+<span class="hljs-addition">+	}</span>
+<span class="hljs-addition">+	reader, err := articlecontent.New(cfg.Storage.RootDir, cfg.Asset.BaseURL)</span>
+ 	if err != nil {
+ 		return err
+ 	}
+<span class="hljs-meta">@@ -68,7 +73,7 @@</span>
+ 		v1.POST(&quot;/catalogue/show&quot;, catalogue.Show)
+ 
+ 		// 获取文章API
+<span class="hljs-deletion">-		v1.POST(&quot;/article/show&quot;, article.Show)</span>
+<span class="hljs-addition">+		v1.POST(&quot;/article/show&quot;, article.Show(reader.ReadMarkdown))</span>
+ 	}
+ 
+ 	return r.Run(&quot;0.0.0.0:&quot; + cfg.Service.Port)
+</code></pre></details>
+</section>
+<section id="frontend"><h2>前端所需变更</h2>
+
+<p><strong>按现有契约和图片输出，本次前端改动为零。</strong> 阅读页提交选中的叶节点 ID，收到正文后用已有渲染器生成图片标签。任何基址或服务器存储路径都无需写入前端配置。</p>
+<div class="scroll"><table><thead><tr><th>已有前端入口</th><th>与本次接口的衔接</th></tr></thead><tbody><tr><td><a href="../../../SolarNotesFrontend/src/api/article.js">src/api/article.js</a> · <a href="../../../SolarNotesFrontend/src/composables/useArticleSync.js">useArticleSync.js</a></td><td>目录 ID 已声明为字符串并原样放入 <code>catalogue.id</code>。现有逻辑在成功、失败和重试时检查当前选中节点。</td></tr><tr><td><a href="../../../SolarNotesFrontend/src/stores/reader/article.js">src/stores/reader/article.js</a> · <a href="../../../SolarNotesFrontend/src/lib/markdown.js">src/lib/markdown.js</a></td><td>从 <code>article.content</code> 取 Markdown，使用 Marked 和 highlight.js 生成 HTML，再由 DOMPurify 清洗。后端生成的 HTTP(S) 图片 URL 可作为最终 <code>src</code>。</td></tr><tr><td><a href="../../../SolarNotesFrontend/src/components/article/ArticlePane.vue">ArticlePane.vue</a> · <a href="../../../SolarNotesFrontend/src/assets/markdown.css">markdown.css</a></td><td>现有文章组件通过 <code>v-html</code> 渲染并单独显示 <code>createdAt</code>。已配置的样式限制图片尺寸。浏览器直接向图片站发起请求。</td></tr></tbody></table></div>
+<p>现在的 <code>http://192.168.1.60:8080</code> 适用于能访问该局域网的阅读端。若正式阅读页通过 HTTPS 提供，部署时应将 <code>asset.base_url</code> 配成浏览器可访问的 HTTPS 图片站，以满足浏览器的混合内容规则。普通 <code>&lt;img&gt;</code> 的展示由浏览器完成。</p></section>
+<section id="checks"><h2>验证结果与实施验收</h2>
+
+<h3>本轮已验证</h3>
+<div class="scroll"><table><thead><tr><th>对象</th><th>结果</th></tr></thead><tbody><tr><td>配置加载</td><td>开发和生产配置均可加载。示例配置填入测试数据库密码后可加载。非法资源 URL、相对存储根被拒绝；配置阶段允许目录尚未挂载。</td></tr><tr><td>线上映射</td><td>对公开文章的两条实际引用逐一解析，Nginx 对两张图片均返回 HTTP 200、image/jpeg。对其中一份 Markdown 源文件直接执行 HEAD 返回 403。只读核对未变更服务器。</td></tr><tr><td>候选实现</td><td>在独立临时模块完成编译与测试。内存 SQLite、Gin 和临时正文文件覆盖大整数 ID、文章日期、隐藏书与祖先、缺失文章和源文件、损坏目录以及数据库故障。</td></tr><tr><td>Markdown 与阅读端</td><td>本地解析回归覆盖中文和空格、引用式图片、查询和片段、代码示例、普通链接以及 HTML 图片属性。在独立 Chrome 页面中，前端现有渲染函数处理两条真实图片引用的候选输出，两张 JPEG 均加载并解码成功，原始尺寸分别为 1317 × 872 和 1557 × 746。该检查使用真实图片站和渲染器，文章 API 端到端验收在实施后进行。</td></tr></tbody></table></div>
+
+<h3>实施后验收</h3>
+<ol>
+  <li>在能读到真实 <code>/solar-notes-data</code> 的环境启动新 API，从公开目录点选上面的叶节点，确认 <code>article.id</code>、日期、完整正文以及实际生成的 URL 与示例对应。</li>
+  <li>以真实阅读页打开两篇有图文章，核对图片网络请求返回 <code>200 image/jpeg</code>、图片正常显示，以及代码片段、普通链接和文章重试行为。另选一篇没有图片的文章，与原文件逐字节比较正文。</li>
+  <li>使用隐藏书、隐藏祖先下的文件、文件夹和不存在的 ID 验证错误映射。实施完成后同步更新文章接口文档和公共 ID 约定中关于固定 mock 值的说明。</li>
+</ol></section></main></body></html>

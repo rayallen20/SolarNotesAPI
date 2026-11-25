@@ -9,3 +9,11 @@ database:
   user: "solar_notes"
   password: ""
   name: "solar_notes"
+
+# 静态资源服务的 HTTP 基址
+asset:
+  base_url: "http://192.168.1.60:8080"
+
+# Markdown 源文件的本地存储根目录
+storage:
+  root_dir: "/solar-notes-data"

@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 
+	"SolarNotesAPI/articlecontent"
 	"SolarNotesAPI/conf"
 	"SolarNotesAPI/controller/v1/article"
 	"SolarNotesAPI/controller/v1/book"
@@ -22,6 +23,10 @@ func main() {
 
 func run() error {
 	cfg, err := conf.Load()
+	if err != nil {
+		return err
+	}
+	reader, err := articlecontent.New(cfg.Storage.RootDir, cfg.Asset.BaseURL)
 	if err != nil {
 		return err
 	}
@@ -68,7 +73,7 @@ func run() error {
 		v1.POST("/catalogue/show", catalogue.Show)
 
 		// 获取文章API
-		v1.POST("/article/show", article.Show)
+		v1.POST("/article/show", article.Show(reader.ReadMarkdown))
 	}
 
 	return r.Run("0.0.0.0:" + cfg.Service.Port)

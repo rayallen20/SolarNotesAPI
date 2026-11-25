@@ -43,13 +43,21 @@ func (Catalogue) ReadBookTree(ctx context.Context, bookID int64) ([]Catalogue, e
 			return err
 		}
 
-		return tx.Select("id", "book_id", "parent_id", "type", "name", "intro", "sort", "display_status", "created_at").
-			Where("book_id = ?", bookID).
-			Order("sort ASC").
-			Find(&rows).Error
+		rows, err = readCatalogueRows(tx, bookID)
+		return err
 	}, opts)
 	if err != nil {
 		return nil, err
 	}
 	return rows, nil
+}
+
+// readCatalogueRows uses the caller's transaction and the tree builder's ordering.
+func readCatalogueRows(tx *gorm.DB, bookID int64) ([]Catalogue, error) {
+	var rows []Catalogue
+	err := tx.Select("id", "book_id", "parent_id", "type", "name", "intro", "sort", "display_status", "created_at").
+		Where("book_id = ?", bookID).
+		Order("sort ASC").
+		Find(&rows).Error
+	return rows, err
 }

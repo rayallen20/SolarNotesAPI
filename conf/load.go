@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -53,5 +54,6 @@ func Load() (*Config, error) {
 	if err := config.validate(); err != nil {
 		return nil, fmt.Errorf("%s 配置无效: %w", filename, err)
 	}
+	config.Asset.BaseURL = strings.TrimRight(config.Asset.BaseURL, "/")
 	return &config, nil
 }
