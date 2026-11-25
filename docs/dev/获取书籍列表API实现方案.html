@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>获取书籍列表 API 实现方案 · SolarNotes API</title>
+  <style>
+    :root { color-scheme: light; font-family: "Source Sans 3", system-ui, sans-serif; line-height: 1.7; color: #202f39; background: #f2f5f4; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 55rem; margin: 2rem auto; padding: clamp(1.25rem, 5vw, 3.5rem); background: white; border-top: 5px solid #17685a; }
+    h1, h2, h3 { line-height: 1.35; color: #153e38; }
+    h1 { margin: 0 0 .7rem; font-size: clamp(1.8rem, 4vw, 2.5rem); }
+    h2 { margin: 2rem 0 .65rem; font-size: 1.35rem; }
+    h3 { margin: 1.25rem 0 .4rem; font-size: 1.04rem; }
+    p, ol { margin: .6rem 0; }
+    ol { padding-left: 1.4rem; }
+    li + li { margin-top: .35rem; }
+    a { color: #17685a; text-underline-offset: .15em; }
+    code { font: .92em/1.55 "IBM Plex Mono", ui-monospace, monospace; overflow-wrap: anywhere; }
+    pre { margin: .6rem 0 1rem; padding: .8rem 1rem; overflow-x: auto; border-left: 3px solid #508979; background: #f1f5f4; tab-size: 4; }
+    pre code { overflow-wrap: normal; }
+    table { width: 100%; border-collapse: collapse; }
+    td, th { padding: .55rem .65rem; text-align: left; vertical-align: top; border-bottom: 1px solid #d6e2df; }
+    th { background: #eaf3ef; }
+    .route, .refs { font-size: .93rem; }
+    .route { color: #17685a; }
+    .source { scroll-margin-top: 1rem; }
+    .source pre { border: 1px solid #d6e2df; background: #f8faf9; }
+    .hljs-keyword, .hljs-type { color: #67369b; }
+    .hljs-string, .hljs-literal { color: #126350; }
+    .hljs-title, .hljs-built_in { color: #205d88; }
+    .hljs-comment { color: #52665e; }
+    @media (max-width: 40rem) { main { margin: 0; } th, td { padding: .45rem .35rem; } }
+    @media print { main { max-width: none; margin: 0; } h2, h3 { break-after: avoid; } tr { break-inside: avoid; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="route"><code>POST /api/v1/book/list</code></p>
+    <h1>获取书籍列表 API 实现方案</h1>
+    <p>用户聚焦天体后，面板展示该天体下允许公开的书籍。现有控制器对 ID 为 2 的天体返回空数组，对其他合法 ID 返回固定八本书。本稿拟用数据库读取替换这两个分支，并让真实书籍 ID 能从书单一路传到目录请求。</p>
+    <nav class="refs" aria-label="文档导航"><a href="#contract">接口契约</a> · <a href="#query">查询与状态码</a> · <a href="#code">审阅 Go 代码</a> · <a href="#frontend">前端改动</a> · <a href="#acceptance">验收</a></nav>
+  </header>
+
+  <section id="contract">
+    <h2>请求与响应</h2>
+    <p>现有路由接收公开的 JSON POST 请求。沿用 <code>param/req/v1/book.ListReq</code>，其 <code>planet.id</code> 已按带引号的十进制字符串解码并校验为正 <code>int64</code>。接口一次返回该天体的完整公开书单，无分页参数。</p>
+    <h3>请求示例</h3>
+    <pre><code id="list-request">{"planet":{"id":"9007199254740993"}}</code></pre>
+    <h3>候选成功响应</h3>
+    <pre><code id="list-response">{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "bookList": [
+      {"id": "9007199254740995", "title": "操作系统入门"},
+      {"id": "9007199254740997", "title": "进程与调度"}
+    ]
+  }
+}</code></pre>
+    <p>每项只含书籍主键 <code>id</code> 和数据库原文 <code>title</code>。后台创建书籍时使用雪花 ID。按项目的大整数约定，拟将 <code>bookList[].id</code> 从当前文档中的 JSON 数字改为十进制字符串，同时将目录请求的 <code>book.id</code> 改为相同类型。数据库和业务层继续使用 <code>int64</code>。</p>
+    <p class="refs"><a href="../api/获取书籍列表API.md">现行书单契约</a> · <a href="../api/获取目录API.md">现行目录契约</a> · <a href="../api/README.md">大整数传输约定</a> · <a href="../../../SolarNotesAdminAPI/biz/book.go">后台书籍发号</a></p>
+  </section>
+
+  <section id="query">
+    <h2>哪些书可以返回</h2>
+    <p>参考后台 <code>OptionsByPlanetID</code> 的读法，在同一个 MySQL 只读、可重复读事务中执行两次查询。第一条确定天体是否存在，第二条按该天体的配置读取可见书籍。两次读共享快照，即使管理端同时调整可见性或书序，一次响应也使用同一版本的数据。</p>
+    <pre><code>SELECT id FROM planet WHERE id = ? LIMIT 1;
+
+SELECT id, title FROM book
+WHERE planet_id = ? AND display_status = 'visible'
+ORDER BY sort ASC;</code></pre>
+    <p>按管理员维护的 <code>book.sort</code> 字段升序返回可见书籍。查询只依赖 <code>planet</code> 和 <code>book</code>，一本可见书即使还没有目录或文章，也会出现在书单。</p>
+    <p class="refs"><a href="../../../SolarNotesAdminAPI/model/book.go">后台 DAO</a> · <a href="../../../SolarNotesAdminAPI/enum/enum.go">显隐取值</a> · <a href="../../../SolarNotesAdminAPI/doc/book-options-api-implementation.html">后台按天体取书的语义</a></p>
+    <h3>待评审的空结果与错误语义</h3>
+    <p>现行前台契约只列出成功响应。建议沿用后台的 <code>20102</code> 表示请求引用的天体已不存在，并保留前台既有的 HTTP 200 和业务码包装。这样，面板能区分正常空书单和失败重试。</p>
+    <table>
+      <thead><tr><th scope="col">情形</th><th scope="col">业务码</th><th scope="col">载荷和前端表现</th></tr></thead>
+      <tbody>
+        <tr><td>存在可见书籍</td><td><code>200</code></td><td><code>data.bookList</code> 为有序数组，展示书名和首本快捷入口。</td></tr>
+        <tr><td>天体存在，无书或全部隐藏</td><td><code>200</code></td><td><code>{"bookList":[]}</code>，面板列表为空，首本入口隐藏。</td></tr>
+        <tr><td>JSON 不合法，或天体 ID 缺失、为数字、非正、溢出</td><td><code>10101</code></td><td><code>data: {}</code>，沿用已有入参校验。</td></tr>
+        <tr><td>格式合法，但天体不存在</td><td><code>20102</code></td><td><code>data: {}</code>，公开消息为“所选天体不存在,请刷新天体列表”。</td></tr>
+        <tr><td>查询或事务提交失败</td><td><code>10201</code></td><td><code>data: {}</code>，复用 <code>DBError()</code>，面板可重试。</td></tr>
+        <tr><td>其他内部错误</td><td><code>500</code></td><td><code>data: {}</code>，复用 <code>InternalError()</code>。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="code">
+    <h2>候选 Go 代码</h2>
+    <p>调用顺序为 <code>controller.List → biz.Book.List → model.Book.ListVisibleByPlanet</code>。控制器传入请求上下文，DAO 使用启动时建立的 <code>db.DB</code>。以下为七个拟新增或替换文件的完整内容。现有书单请求 DTO、数据库连接和路由注册均可直接复用。</p>
+    <nav class="refs" aria-label="代码文件"><a href="#controller">书单控制器</a> · <a href="#biz">业务层</a> · <a href="#model">DAO</a> · <a href="#dto">书单响应</a> · <a href="#error">业务错误</a> · <a href="#envelope">错误响应</a> · <a href="#catalogue-req">目录入参</a></nav>
+    <article class="source" id="controller">
+      <h3><code>controller/v1/book/book.go</code></h3>
+      <p>替换现有控制器。只向调用方公开书籍 ID 和标题，提前初始化切片以保证空书单序列化为数组。</p>
+      <pre><code class="language-go" data-file="controller/v1/book/book.go"><span class="hljs-keyword">package</span> book
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;errors&quot;</span>
+	<span class="hljs-string">&quot;net/http&quot;</span>
+	<span class="hljs-string">&quot;strconv&quot;</span>
+
+	<span class="hljs-string">&quot;SolarNotesAPI/biz&quot;</span>
+	reqBook <span class="hljs-string">&quot;SolarNotesAPI/param/req/v1/book&quot;</span>
+	respBook <span class="hljs-string">&quot;SolarNotesAPI/param/resp/v1/book&quot;</span>
+	<span class="hljs-string">&quot;SolarNotesAPI/resp_body&quot;</span>
+	<span class="hljs-string">&quot;SolarNotesAPI/sys_error&quot;</span>
+
+	<span class="hljs-string">&quot;github.com/gin-gonic/gin&quot;</span>
+)
+
+<span class="hljs-comment">// List 返回所选天体的公开书单.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">List</span><span class="hljs-params">(c *gin.Context)</span></span> {
+	<span class="hljs-keyword">var</span> req reqBook.ListReq
+	<span class="hljs-keyword">var</span> body resp_body.RespBody
+	<span class="hljs-keyword">if</span> err := c.ShouldBindJSON(&amp;req); err != <span class="hljs-literal">nil</span> {
+		body.ValidateFailed(err)
+		c.JSON(http.StatusOK, body)
+		<span class="hljs-keyword">return</span>
+	}
+
+	<span class="hljs-keyword">var</span> service biz.Book
+	books, err := service.List(c.Request.Context(), req.Planet.ID)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">var</span> dbErr *sys_error.DatabaseError
+		<span class="hljs-keyword">switch</span> {
+		<span class="hljs-keyword">case</span> errors.Is(err, sys_error.PlanetNotFoundErr):
+			body.PlanetNotFoundError()
+		<span class="hljs-keyword">case</span> errors.As(err, &amp;dbErr):
+			body.DBError()
+		<span class="hljs-keyword">default</span>:
+			body.InternalError()
+		}
+		c.JSON(http.StatusOK, body)
+		<span class="hljs-keyword">return</span>
+	}
+
+	items := <span class="hljs-built_in">make</span>([]respBook.ListItem, <span class="hljs-number">0</span>, <span class="hljs-built_in">len</span>(books))
+	<span class="hljs-keyword">for</span> _, book := <span class="hljs-keyword">range</span> books {
+		items = <span class="hljs-built_in">append</span>(items, respBook.ListItem{
+			ID:    strconv.FormatInt(book.ID, <span class="hljs-number">10</span>),
+			Title: book.Title,
+		})
+	}
+	body.Success(<span class="hljs-keyword">map</span>[<span class="hljs-type">string</span>]any{<span class="hljs-string">&quot;bookList&quot;</span>: items})
+	c.JSON(http.StatusOK, body)
+}</code></pre>
+    </article>
+
+    <article class="source" id="biz">
+      <h3><code>biz/book.go</code></h3>
+      <p>新增业务实体。天体不存在时返回业务错误，其他 DAO 故障用现有数据库错误包装。</p>
+      <pre><code class="language-go" data-file="biz/book.go"><span class="hljs-keyword">package</span> biz
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;context&quot;</span>
+	<span class="hljs-string">&quot;errors&quot;</span>
+
+	<span class="hljs-string">&quot;SolarNotesAPI/model&quot;</span>
+	<span class="hljs-string">&quot;SolarNotesAPI/sys_error&quot;</span>
+)
+
+<span class="hljs-keyword">type</span> Book <span class="hljs-keyword">struct</span> {
+	ID    <span class="hljs-type">int64</span>
+	Title <span class="hljs-type">string</span>
+}
+
+<span class="hljs-comment">// List 保留 DAO 提供的展示顺序, 将数据访问错误转换为接口可识别的类别.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(Book)</span></span> List(ctx context.Context, planetID <span class="hljs-type">int64</span>) ([]Book, <span class="hljs-type">error</span>) {
+	<span class="hljs-keyword">if</span> ctx == <span class="hljs-literal">nil</span> || planetID &lt;= <span class="hljs-number">0</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, &amp;sys_error.InternalError{Cause: errors.New(<span class="hljs-string">&quot;biz.Book.List: invalid context or planet ID&quot;</span>)}
+	}
+
+	<span class="hljs-keyword">var</span> dao model.Book
+	rows, err := dao.ListVisibleByPlanet(ctx, planetID)
+	<span class="hljs-keyword">if</span> errors.Is(err, model.PlanetNotFoundErr) {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, sys_error.PlanetNotFoundErr
+	}
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, &amp;sys_error.DatabaseError{Cause: err}
+	}
+
+	books := <span class="hljs-built_in">make</span>([]Book, <span class="hljs-number">0</span>, <span class="hljs-built_in">len</span>(rows))
+	<span class="hljs-keyword">for</span> _, row := <span class="hljs-keyword">range</span> rows {
+		books = <span class="hljs-built_in">append</span>(books, Book{ID: row.ID, Title: row.Title})
+	}
+	<span class="hljs-keyword">return</span> books, <span class="hljs-literal">nil</span>
+}</code></pre>
+    </article>
+
+    <article class="source" id="model">
+      <h3><code>model/book.go</code></h3>
+      <p>新增 DAO。GORM 通过现有单数表名配置推导表名，每次查询使用同一个事务句柄。</p>
+      <pre><code class="language-go" data-file="model/book.go"><span class="hljs-keyword">package</span> model
+
+<span class="hljs-keyword">import</span> (
+	<span class="hljs-string">&quot;context&quot;</span>
+	<span class="hljs-string">&quot;database/sql&quot;</span>
+	<span class="hljs-string">&quot;errors&quot;</span>
+
+	<span class="hljs-string">&quot;SolarNotesAPI/db&quot;</span>
+
+	<span class="hljs-string">&quot;gorm.io/gorm&quot;</span>
+)
+
+<span class="hljs-keyword">var</span> PlanetNotFoundErr = errors.New(<span class="hljs-string">&quot;planet not found&quot;</span>)
+
+<span class="hljs-comment">// Book 映射书单查询需要返回的两列.</span>
+<span class="hljs-keyword">type</span> Book <span class="hljs-keyword">struct</span> {
+	ID    <span class="hljs-type">int64</span>  <span class="hljs-string">`gorm:&quot;column:id;primaryKey;autoIncrement:false&quot;`</span>
+	Title <span class="hljs-type">string</span> <span class="hljs-string">`gorm:&quot;column:title&quot;`</span>
+}
+
+<span class="hljs-comment">// ListVisibleByPlanet 在同一只读快照内检查天体并查询书单.</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(Book)</span></span> ListVisibleByPlanet(ctx context.Context, planetID <span class="hljs-type">int64</span>) ([]Book, <span class="hljs-type">error</span>) {
+	<span class="hljs-keyword">if</span> db.DB == <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, errors.New(<span class="hljs-string">&quot;database connection is not initialized&quot;</span>)
+	}
+
+	<span class="hljs-keyword">var</span> books []Book
+	opts := &amp;sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: <span class="hljs-literal">true</span>}
+	err := db.DB.WithContext(ctx).Transaction(<span class="hljs-function"><span class="hljs-keyword">func</span><span class="hljs-params">(tx *gorm.DB)</span></span> <span class="hljs-type">error</span> {
+		<span class="hljs-keyword">var</span> planet Planet
+		err := tx.Select(<span class="hljs-string">&quot;id&quot;</span>).Where(<span class="hljs-string">&quot;id = ?&quot;</span>, planetID).Take(&amp;planet).Error
+		<span class="hljs-keyword">if</span> errors.Is(err, gorm.ErrRecordNotFound) {
+			<span class="hljs-keyword">return</span> PlanetNotFoundErr
+		}
+		<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+			<span class="hljs-keyword">return</span> err
+		}
+
+		<span class="hljs-keyword">return</span> tx.Select(<span class="hljs-string">&quot;id&quot;</span>, <span class="hljs-string">&quot;title&quot;</span>).
+			Where(<span class="hljs-string">&quot;planet_id = ? AND display_status = ?&quot;</span>, planetID, <span class="hljs-string">&quot;visible&quot;</span>).
+			Order(<span class="hljs-string">&quot;sort ASC&quot;</span>).
+			Find(&amp;books).Error
+	}, opts)
+	<span class="hljs-keyword">if</span> err != <span class="hljs-literal">nil</span> {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, err
+	}
+	<span class="hljs-keyword">return</span> books, <span class="hljs-literal">nil</span>
+}</code></pre>
+    </article>
+
+    <article class="source" id="dto">
+      <h3><code>param/resp/v1/book/list.go</code></h3>
+      <p>新增对外书单项。所有合法书籍 ID 均使用字符串。</p>
+      <pre><code class="language-go" data-file="param/resp/v1/book/list.go"><span class="hljs-keyword">package</span> book
+
+<span class="hljs-comment">// ListItem 是 data.bookList 中的一本书.</span>
+<span class="hljs-keyword">type</span> ListItem <span class="hljs-keyword">struct</span> {
+	ID    <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;id&quot;`</span>
+	Title <span class="hljs-type">string</span> <span class="hljs-string">`json:&quot;title&quot;`</span>
+}</code></pre>
+    </article>
+
+    <article class="source" id="error">
+      <h3><code>sys_error/planet_error.go</code></h3>
+      <p>新增可用 errors.Is 识别的天体不存在错误。</p>
+      <pre><code class="language-go" data-file="sys_error/planet_error.go"><span class="hljs-keyword">package</span> sys_error
+
+<span class="hljs-keyword">import</span> <span class="hljs-string">&quot;errors&quot;</span>
+
+<span class="hljs-keyword">var</span> PlanetNotFoundErr = errors.New(<span class="hljs-string">&quot;所选天体不存在,请刷新天体列表&quot;</span>)</code></pre>
+    </article>
+
+    <article class="source" id="envelope">
+      <h3><code>resp_body/planet_error.go</code></h3>
+      <p>新增同包文件，复用已有的 failure 方法设置业务码、消息和空对象。</p>
+      <pre><code class="language-go" data-file="resp_body/planet_error.go"><span class="hljs-keyword">package</span> resp_body
+
+<span class="hljs-keyword">import</span> <span class="hljs-string">&quot;SolarNotesAPI/sys_error&quot;</span>
+
+<span class="hljs-keyword">const</span> PlanetNotFoundCode = <span class="hljs-number">20102</span>
+
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(r *RespBody)</span></span> PlanetNotFoundError() {
+	r.failure(PlanetNotFoundCode, sys_error.PlanetNotFoundErr.Error())
+}</code></pre>
+    </article>
+
+    <article class="source" id="catalogue-req">
+      <h3><code>param/req/v1/catalogue/show.go</code></h3>
+      <p>替换现有目录请求结构。与书单输出同时发布，使真实主键可以直接回传。</p>
+      <pre><code class="language-go" data-file="param/req/v1/catalogue/show.go"><span class="hljs-keyword">package</span> catalogue
+
+<span class="hljs-keyword">type</span> ShowReq <span class="hljs-keyword">struct</span> {
+	Book *ShowBook <span class="hljs-string">`json:&quot;book&quot; binding:&quot;required&quot;`</span>
+}
+
+<span class="hljs-keyword">type</span> ShowBook <span class="hljs-keyword">struct</span> {
+	ID <span class="hljs-type">int64</span> <span class="hljs-string">`json:&quot;id,string&quot; binding:&quot;gt=0&quot;`</span>
+}</code></pre>
+    </article>
+  </section>
+
+  <section id="frontend">
+    <h2>从书单进入目录</h2>
+    <p>书单的逐本链接和首本快捷入口均把 <code>book.id</code> 原样写入 <code>/article/:id</code>，书单项的前端类型也已声明为字符串。当前阅读页会执行 <code>Number(bookId)</code>，使超出 JavaScript 安全整数范围的书籍 ID 在发起目录请求前失真。</p>
+    <p>以下是前后端同期落地时需要的两处前端修改。保留路由切换、重试和旧请求结果的处理逻辑。目录请求使用上节的 Go DTO；它的控制器仍可返回现有目录 mock，目录节点 ID 和文章 ID 的迁移留给对应接口。</p>
+    <h3><code>src/composables/useCatalogueSync.js</code></h3>
+    <pre><code class="language-diff" data-file="src/composables/useCatalogueSync.js">--- a/src/composables/useCatalogueSync.js
++++ b/src/composables/useCatalogueSync.js
+@@ -31,3 +31,3 @@
+             try {
+-                const {catalogue} = await getCatalogue(Number(bookId))
++                const {catalogue} = await getCatalogue(bookId)
+                 // 竟态条件: 在await期间,路由可能已经切换,因此仅在路由中参数仍为请求时使用的值时,才写入catalogueStore</code></pre>
+
+    <h3><code>src/api/catalogue.js</code></h3>
+    <pre><code class="language-diff" data-file="src/api/catalogue.js">--- a/src/api/catalogue.js
++++ b/src/api/catalogue.js
+@@ -16,3 +16,3 @@
+  * 本函数用于请求指定书籍目录树API
+- * @param {Number} id 书籍id
++ * @param {String} id 书籍 ID 的十进制字符串
+  * @return {Promise&lt;{catalogue: CatalogueNode}&gt;} 含目录树根节点的Promise对象</code></pre>
+    <p>点击上面示例中的第二本书，目录接口应收到以下请求体。</p>
+    <pre><code id="catalogue-request">{"book":{"id":"9007199254740997"}}</code></pre>
+    <p>落地时同步更新书单文档的响应字段表和示例、目录文档的请求字段表和示例，以及 API 总约定中的迁移状态。为兼容书签和刷新，阅读页取到的字符串路由参数也走同一条路径。</p>
+    <p class="refs"><a href="../../../SolarNotesFrontend/src/components/panel/PanelList.vue">逐本链接</a> · <a href="../../../SolarNotesFrontend/src/components/SolarPanel.vue">首本快捷入口</a> · <a href="../../../SolarNotesFrontend/src/composables/useCatalogueSync.js">路由到目录</a> · <a href="../../../SolarNotesFrontend/src/api/catalogue.js">目录请求</a></p>
+  </section>
+
+  <section id="acceptance">
+    <h2>验收与实库核对</h2>
+    <p><strong>评审前验证。</strong>从本页提取的七份 Go 代码在临时工程副本中通过了构建和 <code>go vet</code>。SQLite 内存库与 <code>httptest</code> 覆盖了可见性、跨天体隔离、排序、空书单、大 ID 传入目录，以及三类失败响应。在前端临时加载候选改动后，首本入口、多书列表第二项和直接深链都将原始字符串传入目录请求，包括 <code>"9223372036854775807"</code>。生产用 MySQL 的事务行为与真实数据留到正式实施时验证。</p>
+    <ol>
+      <li><strong>隔离与排序。</strong>在测试数据中为两个天体放入书籍，混合可见与隐藏状态，并让主键顺序与书序不同。结果只含目标天体的可见记录，按 <code>sort</code> 从小到大排列，书名逐字一致。</li>
+      <li><strong>空表与失败。</strong>分别验证存在但无书、全部隐藏、天体不存在、查询错误，以及旧 mock 特判的天体 ID <code>"2"</code>。ID 为 2 时同样只由实际数据决定结果。</li>
+      <li><strong>ID 精度。</strong>用超过 <code>Number.MAX_SAFE_INTEGER</code> 的书籍 ID 检查首本入口、第二本链接和直接打开阅读页。书单响应、路由和目录请求中的 ID 必须逐位相同；裸数字、负数、零及超出正 <code>int64</code> 的 ID 应在入参绑定时失败。</li>
+      <li><strong>实施后实库核对。</strong>从开发环境天体列表选择真实 ID，按下列方式请求书单。用独立只读 SQL 筛选该天体的可见书籍，按 <code>sort ASC</code> 核对返回顺序，并校验行数、书名和每个书籍 ID 的十进制原文，再用其中一本书的 ID 请求目录。</li>
+    </ol>
+    <pre><code>curl -sS http://127.0.0.1:4061/api/v1/book/list \
+  -H 'Content-Type: application/json' \
+  --data '{"planet":{"id":"9007199254740993"}}'</code></pre>
+  </section>
+</main>
+</body>
+</html>

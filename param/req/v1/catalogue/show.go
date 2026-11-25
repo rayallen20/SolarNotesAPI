@@ -5,5 +5,5 @@ type ShowReq struct {
 }
 
 type ShowBook struct {
-	Id *int `json:"id" binding:"required"`
+	ID int64 `json:"id,string" binding:"gt=0"`
 }

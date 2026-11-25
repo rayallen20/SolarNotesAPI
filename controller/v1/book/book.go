@@ -1,72 +1,52 @@
 package book
 
 import (
-	"SolarNotesAPI/param/req/v1/book"
-	"SolarNotesAPI/resp_body"
+	"errors"
 	"net/http"
+	"strconv"
+
+	"SolarNotesAPI/biz"
+	reqBook "SolarNotesAPI/param/req/v1/book"
+	respBook "SolarNotesAPI/param/resp/v1/book"
+	"SolarNotesAPI/resp_body"
+	"SolarNotesAPI/sys_error"
 
 	"github.com/gin-gonic/gin"
 )
 
-// List 书籍列表API
+// List 返回所选天体的公开书单.
 func List(c *gin.Context) {
-	req := &book.ListReq{}
-	respBody := &resp_body.RespBody{}
+	var req reqBook.ListReq
+	var body resp_body.RespBody
+	if err := c.ShouldBindJSON(&req); err != nil {
+		body.ValidateFailed(err)
+		c.JSON(http.StatusOK, body)
+		return
+	}
 
-	err := c.ShouldBindJSON(req)
+	var service biz.Book
+	books, err := service.List(c.Request.Context(), req.Planet.ID)
 	if err != nil {
-		respBody.ValidateFailed(err)
-		c.JSON(http.StatusOK, respBody)
-		return
-	}
-
-	if req.Planet.ID == 2 {
-		data := map[string]interface{}{
-			"bookList": []map[string]interface{}{},
+		var dbErr *sys_error.DatabaseError
+		switch {
+		case errors.Is(err, sys_error.PlanetNotFoundErr):
+			body.PlanetNotFoundError()
+		case errors.As(err, &dbErr):
+			body.DBError()
+		default:
+			body.InternalError()
 		}
-		respBody.Success(data)
-		c.JSON(http.StatusOK, respBody)
+		c.JSON(http.StatusOK, body)
 		return
 	}
 
-	data := map[string]interface{}{
-		"bookList": []map[string]interface{}{
-			{
-				"id":    1,
-				"title": "详解操作系统",
-			},
-			{
-				"id":    2,
-				"title": "操作系统解密",
-			},
-			{
-				"id":    3,
-				"title": "数据库教程",
-			},
-			{
-				"id":    4,
-				"title": "算法基础",
-			},
-			{
-				"id":    5,
-				"title": "计算机网络",
-			},
-			{
-				"id":    6,
-				"title": "设计模式",
-			},
-			{
-				"id":    7,
-				"title": "编码规范",
-			},
-			{
-				"id":    8,
-				"title": "微服务设计模式",
-			},
-		},
+	items := make([]respBook.ListItem, 0, len(books))
+	for _, book := range books {
+		items = append(items, respBook.ListItem{
+			ID:    strconv.FormatInt(book.ID, 10),
+			Title: book.Title,
+		})
 	}
-
-	respBody.Success(data)
-	c.JSON(http.StatusOK, respBody)
-	return
+	body.Success(map[string]any{"bookList": items})
+	c.JSON(http.StatusOK, body)
 }
